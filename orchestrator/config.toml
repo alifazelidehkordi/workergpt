@@ -1,6 +1,11 @@
 [runtime]
 mode = "mock"
-timeout = 120
+timeout = 300
+
+[browser]
+provider = "patchright"
+profile = "default"
+headless = false
 
 [output]
 latest_file = "latest.md"
