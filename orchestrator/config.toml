@@ -1,0 +1,6 @@
+[runtime]
+mode = "mock"
+timeout = 120
+
+[output]
+latest_file = "latest.md"
