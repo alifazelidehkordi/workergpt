@@ -1,1 +1,2 @@
 pytest>=8.0
+patchright==1.61.2
