@@ -25,6 +25,12 @@ STOP_BUTTON_SELECTORS = (
     "button[data-testid='stop-button']",
     "button[aria-label*='Stop']",
 )
+DOWNLOAD_SELECTORS = (
+    "a[download]",
+    "a[href*='files.oaiusercontent.com']",
+    "a:has-text('Download')",
+    "button:has-text('Download')",
+)
 ASSISTANT_MESSAGE_SELECTOR = "[data-message-author-role='assistant']"
 FILE_INPUT_SELECTOR = "input[type='file']"
 RATE_LIMIT_PHRASES = (
@@ -35,6 +41,7 @@ RATE_LIMIT_PHRASES = (
     "rate limit",
     "usage limit",
     "try again later",
+    "come back later",
 )
 
 
@@ -102,7 +109,7 @@ def _visible(page: Any, selectors: tuple[str, ...]) -> Any | None:
 
 
 class PatchrightChatGPTSession:
-    """Small, purpose-built persistent Patchright session for ChatGPT."""
+    """Purpose-built persistent Patchright session for ChatGPT."""
 
     def __init__(self, options: BrowserOptions) -> None:
         self.options = options
@@ -172,7 +179,7 @@ class PatchrightChatGPTSession:
         if not self.is_authenticated():
             raise AuthenticationRequiredError(
                 f"ChatGPT login is required for profile: {self.options.profile_dir}. "
-                "Run `python -m orchestrator.login --profile <name>` first."
+                "Run `python -m orchestrator login --profile <name>` first."
             )
 
     def start_new_chat(self) -> None:
@@ -219,11 +226,13 @@ class PatchrightChatGPTSession:
         return before
 
     def wait_for_response(self, before_count: int, timeout_seconds: int) -> str:
-        deadline = time.monotonic() + timeout_seconds
+        started = time.monotonic()
+        hard_deadline = started + timeout_seconds
+        activity_deadline = min(hard_deadline, started + min(60, max(20, timeout_seconds // 2)))
         seen_response = False
         stable_since: float | None = None
         last_text = ""
-        while time.monotonic() < deadline:
+        while time.monotonic() < hard_deadline:
             body = self.page.locator("body").inner_text(timeout=3000)
             if any(phrase in body.lower() for phrase in RATE_LIMIT_PHRASES):
                 return "__ORCHESTRATOR_RATE_LIMIT__\n" + body[-4000:]
@@ -236,17 +245,58 @@ class PatchrightChatGPTSession:
                 except Exception:
                     current = ""
                 generating = _visible(self.page, STOP_BUTTON_SELECTORS) is not None
-                if current and current == last_text and not generating:
+                if current != last_text:
+                    last_text = current
+                    stable_since = None
+                    activity_deadline = min(hard_deadline, time.monotonic() + 30)
+                elif current and not generating:
                     stable_since = stable_since or time.monotonic()
                     if time.monotonic() - stable_since >= 1.0:
                         return current
-                else:
-                    stable_since = None
-                    last_text = current
+            if time.monotonic() >= activity_deadline and not seen_response:
+                raise TimeoutError("ChatGPT did not start responding before the activity timeout")
             time.sleep(0.5)
         if seen_response and last_text:
             return last_text
         raise TimeoutError(f"Timed out waiting for ChatGPT response after {timeout_seconds}s")
+
+    def collect_downloads(self, *, timeout_seconds: int = 20, limit: int = 5) -> list[Path]:
+        """Capture visible ChatGPT download controls after a response."""
+        saved: list[Path] = []
+        seen: set[str] = set()
+        for selector in DOWNLOAD_SELECTORS:
+            try:
+                candidates = self.page.locator(selector)
+                count = min(int(candidates.count()), limit)
+            except Exception:
+                continue
+            for index in range(count):
+                candidate = candidates.nth(index)
+                try:
+                    signature = f"{selector}:{candidate.get_attribute('href')}:{candidate.inner_text(timeout=500)}"
+                except Exception:
+                    signature = f"{selector}:{index}"
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                try:
+                    with self.page.expect_download(timeout=timeout_seconds * 1000) as info:
+                        try:
+                            candidate.evaluate("(element) => element.click()")
+                        except Exception:
+                            candidate.click()
+                    download = info.value
+                    destination = self.options.download_dir / download.suggested_filename
+                    if destination.exists():
+                        stem, suffix = destination.stem, destination.suffix
+                        destination = destination.with_name(f"{stem}_{int(time.time())}{suffix}")
+                    download.save_as(str(destination))
+                    saved.append(destination)
+                    if len(saved) >= limit:
+                        return saved
+                except Exception:
+                    continue
+        return saved
 
 
 def open_login_session(profile: str = "default", profile_dir: Path | None = None) -> PatchrightChatGPTSession:
