@@ -63,6 +63,9 @@ def main() -> None:
     pipeline.add_argument("--skip-synthesizer", action="store_true")
     pipeline.add_argument("--skip-checkpoint", action="store_true")
 
+    resume = sub.add_parser("resume", help="Retry the latest rate-limit checkpoint")
+    resume.add_argument("project_id")
+
     status = sub.add_parser("status", help="Show project status")
     status.add_argument("project_id")
 
@@ -119,6 +122,10 @@ def main() -> None:
             )
             for name, output in results.items():
                 print(f"{name}: {'OK' if output.success else 'FAILED'}")
+        elif args.command == "resume":
+            output = orch.resume_last(args.project_id)
+            print(f"{output.agent_name}: {'OK' if output.success else 'FAILED'}")
+            print(output.content)
         elif args.command == "status":
             state = orch.load_state(args.project_id)
             print(f"Project: {state.project_id}")
