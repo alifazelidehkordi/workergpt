@@ -70,6 +70,7 @@ class RealChatGPTWebExecutor:
                 "usage limit",
                 "too many requests",
                 "try again later",
+                "come back later",
             )
         )
 
@@ -85,10 +86,27 @@ class RealChatGPTWebExecutor:
             limit_hit = self._is_limit_text(text)
             if text.startswith("__ORCHESTRATOR_RATE_LIMIT__"):
                 text = text.split("\n", 1)[1] if "\n" in text else text
+
+            downloaded: list[Path] = []
+            if not limit_hit and request.expected_output in {"file", "both"}:
+                downloaded = session.collect_downloads(
+                    timeout_seconds=min(30, max(5, request.timeout_seconds // 10)),
+                )
+
+            has_expected_output = bool(text) if request.expected_output == "text" else bool(downloaded)
+            if request.expected_output == "both":
+                has_expected_output = bool(text) and bool(downloaded)
+            error = None
+            if limit_hit:
+                error = "ChatGPT usage/rate limit detected"
+            elif not has_expected_output:
+                error = f"Expected {request.expected_output} output was not produced"
+
             return ExecuteResult(
-                success=bool(text) and not limit_hit,
+                success=has_expected_output and not limit_hit,
                 text_response=text or None,
-                error="ChatGPT usage/rate limit detected" if limit_hit else None,
+                downloaded_files=downloaded,
+                error=error,
                 limit_hit=limit_hit,
                 execution_time=time.monotonic() - start,
                 metadata={
