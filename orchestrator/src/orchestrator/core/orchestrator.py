@@ -22,10 +22,7 @@ class Orchestrator:
         self.root_dir = Path(root_dir)
         self.projects_dir = self.root_dir / "projects"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
-        self.executor = ChatGPTWebExecutor(
-            use_mock=use_mock_executor,
-            **(executor_options or {}),
-        )
+        self.executor = ChatGPTWebExecutor(use_mock=use_mock_executor, **(executor_options or {}))
         self.agents = {
             "researcher": ResearcherAgent(),
             "critic": CriticAgent(),
@@ -71,18 +68,38 @@ class Orchestrator:
     def _save_agent_output(self, project_id: str, agent_name: str, output: AgentOutput) -> Path:
         project_path = self.projects_dir / project_id
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        if agent_name == "checkpoint":
-            folder = project_path / "checkpoints"
-        elif agent_name == "critic":
-            folder = project_path / "critics"
-        else:
-            folder = project_path / "modules"
+        folder = project_path / ("checkpoints" if agent_name == "checkpoint" else "critics" if agent_name == "critic" else "modules")
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{agent_name}_{timestamp}.md"
         path.write_text(output.content, encoding="utf-8")
         outbox = project_path / "outbox"
         outbox.mkdir(parents=True, exist_ok=True)
         (outbox / "latest.md").write_text(output.content, encoding="utf-8")
+        return path
+
+    def _write_resume_checkpoint(
+        self,
+        project_id: str,
+        agent_name: str,
+        context: dict[str, Any],
+        files: list[Path] | None,
+        error: str,
+    ) -> Path:
+        project_path = self.projects_dir / project_id
+        checkpoint_dir = project_path / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        path = checkpoint_dir / f"resume_{timestamp}.json"
+        payload = {
+            "created_at": datetime.now(UTC).isoformat(),
+            "project_id": project_id,
+            "agent_name": agent_name,
+            "context": context,
+            "files": [str(Path(item)) for item in (files or [])],
+            "error": error,
+            "completed": False,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     def run_agent(
@@ -114,7 +131,16 @@ class Orchestrator:
 
         state = self.load_state(project_id)
         if result.limit_hit:
+            resume_path = self._write_resume_checkpoint(
+                project_id,
+                agent_name,
+                context or {},
+                files,
+                result.error or "ChatGPT usage/rate limit",
+            )
             state.status = "paused_due_to_limit"
+            state.last_checkpoint = str(resume_path.relative_to(self.projects_dir / project_id))
+            state.progress["resume_pending"] = True
             state.notes = f"Paused during {agent_name}: ChatGPT usage/rate limit"
         elif output.success:
             state.status = "in_progress"
@@ -124,6 +150,32 @@ class Orchestrator:
             state.notes = f"Agent failed: {agent_name}: {output.content[:300]}"
         state.active_agent = None
         self.save_state(project_id, state)
+        return output
+
+    def resume_last(self, project_id: str) -> AgentOutput:
+        checkpoint_dir = self.projects_dir / project_id / "checkpoints"
+        candidates = sorted(checkpoint_dir.glob("resume_*.json"), reverse=True)
+        if not candidates:
+            raise FileNotFoundError("No resumable rate-limit checkpoint found")
+        path = candidates[0]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("completed"):
+            raise RuntimeError("Latest resume checkpoint is already completed")
+        output = self.run_agent(
+            project_id,
+            str(payload["agent_name"]),
+            context=dict(payload.get("context") or {}),
+            files=[Path(item) for item in payload.get("files", [])],
+        )
+        if output.success:
+            payload["completed"] = True
+            payload["completed_at"] = datetime.now(UTC).isoformat()
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            state = self.load_state(project_id)
+            state.progress["resume_pending"] = False
+            state.status = "in_progress"
+            state.notes = f"Resumed successfully from {path.name}"
+            self.save_state(project_id, state)
         return output
 
     def research(self, project_id: str, question: str, goal: str | None = None) -> AgentOutput:
@@ -176,9 +228,7 @@ class Orchestrator:
                 return results
 
         if run_checkpoint:
-            recent = "\n\n".join(
-                f"### {name.title()}\n{output.content[:1500]}" for name, output in results.items()
-            )
+            recent = "\n\n".join(f"### {name.title()}\n{output.content[:1500]}" for name, output in results.items())
             checkpoint = self.create_checkpoint(project_id, recent)
             results["checkpoint"] = checkpoint
             if not checkpoint.success:
