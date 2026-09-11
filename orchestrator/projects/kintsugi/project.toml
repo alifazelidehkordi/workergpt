@@ -1,0 +1,11 @@
+[project]
+id = "kintsugi"
+name = "سیستم کینتسوگی"
+description = "پروتکل تحقیق و توسعه علمی"
+created = "2026-09-11"
+status = "active"
+
+[settings]
+default_model_preference = "balanced"
+max_retries = 3
+auto_checkpoint = true
