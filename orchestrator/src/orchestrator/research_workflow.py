@@ -92,6 +92,12 @@ def _clean_model_block(text: str) -> str:
     fence = re.search(r"```(?:markdown|md|json)?\s*\n([\s\S]*?)\n```", value, flags=re.IGNORECASE)
     if fence:
         value = fence.group(1).strip()
+    # ChatGPT's rendered code-block DOM can occasionally preserve only the
+    # language badge as a plain first line (without the backtick fence).
+    # It is UI chrome, not dossier content.
+    lines = value.splitlines()
+    if len(lines) > 1 and lines[0].strip().lower() in {"markdown", "md", "json"}:
+        value = "\n".join(lines[1:]).lstrip()
     return value.strip() + "\n"
 
 
@@ -613,14 +619,21 @@ class ResearchWorkflow:
             if section.get("status") == "needs_review" and not approved_path.exists():
                 attempt = int(section.get("section_revision_attempts", 0)) + 1
                 if attempt > max_section_revisions:
-                    topic["status"] = "needs_review"
-                    state["status"] = "needs_review"
-                    state["active"] = None
-                    self.save(state)
-                    return {"topic": topic_id, "status": "needs_review", "section": spec.id, "issues": section.get("unresolved", [])}
-                self._archive_section_attempt(
-                    state, topic_id, spec.id, list(section.get("unresolved", [])), "resume_needs_review"
-                )
+                    recovered = self._recover_archived_draft(topic_id, spec, section, draft_path)
+                    if recovered:
+                        topic["status"] = "in_progress"
+                        state["status"] = "running"
+                        self.save(state)
+                    else:
+                        topic["status"] = "needs_review"
+                        state["status"] = "needs_review"
+                        state["active"] = None
+                        self.save(state)
+                        return {"topic": topic_id, "status": "needs_review", "section": spec.id, "issues": section.get("unresolved", [])}
+                else:
+                    self._archive_section_attempt(
+                        state, topic_id, spec.id, list(section.get("unresolved", [])), "resume_needs_review"
+                    )
 
             if section["status"] == "complete" and approved_path.exists():
                 if section.get("approved_hash") and _sha256(approved_path.read_text(encoding="utf-8")) != section["approved_hash"]:
@@ -841,6 +854,33 @@ class ResearchWorkflow:
         self.save(state)
         self.sync_vault_progress()
         return {"topic": topic_id, "status": "complete", "audit": audit, "local_issues": []}
+
+    def _recover_archived_draft(
+        self,
+        topic_id: str,
+        spec: SectionSpec,
+        section: dict[str, Any],
+        draft_path: Path,
+    ) -> bool:
+        """Recover a valid draft previously rejected because UI chrome leaked in."""
+        revisions = self._artifact_dir(topic_id, spec.id) / "revisions"
+        candidates = sorted(
+            revisions.glob("section-attempt-*/draft.md"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for candidate in candidates:
+            cleaned = _clean_model_block(candidate.read_text(encoding="utf-8"))
+            if _validate_section_content(spec, cleaned):
+                continue
+            _atomic_write(draft_path, cleaned)
+            section["draft"] = str(draft_path.relative_to(self.project_dir))
+            section["draft_hash"] = _sha256(cleaned)
+            section["status"] = "researched"
+            section.pop("unresolved", None)
+            section.pop("review_feedback", None)
+            return True
+        return False
 
     def _assemble(self, topic_id: str, original: str, topic: dict[str, Any]) -> str:
         first_heading = original.find("# ")

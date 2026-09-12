@@ -13,10 +13,15 @@ from orchestrator.research_workflow import (
     TOPIC_PLANNER_TIMEOUT_SECONDS,
     ResearchWorkflow,
     SECTIONS,
+    _clean_model_block,
     _parse_final_audit,
     _parse_section_review,
     _sha256,
 )
+
+
+def test_clean_model_block_removes_rendered_language_badge():
+    assert _clean_model_block("Markdown\n## تیتر\n\nمتن") == "## تیتر\n\nمتن\n"
 
 
 def _topic(topic_id: str = "KSR-1", title: str = "آزمون") -> str:
