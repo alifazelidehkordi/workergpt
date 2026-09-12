@@ -219,6 +219,45 @@ def _apply_targeted_patches(draft: str, patches: list[dict[str, str]]) -> str:
     return updated.strip() + "\n"
 
 
+def _targeted_repair_context(draft: str, issues: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Select only the most relevant paragraph for each critic issue."""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", draft) if part.strip()]
+    if not paragraphs:
+        return []
+
+    def terms(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"[\w\u0600-\u06ff‌-]{4,}", value)
+            if token.casefold() not in {"برای", "اینکه", "باید", "شود", "است", "هست"}
+        }
+
+    selected: list[dict[str, str]] = []
+    used: set[str] = set()
+    for issue in issues:
+        query_text = (
+            f"{issue.get('location', '')} {issue.get('problem', '')} "
+            f"{issue.get('required_change', '')}"
+        )
+        query_terms = terms(query_text)
+
+        def paragraph_score(paragraph: str) -> int:
+            score = len(query_terms & terms(paragraph))
+            if any(word in query_text for word in ("منبع", "ارجاع", "استناد")) and "http" in paragraph:
+                score += 20
+            return score
+
+        ranked = sorted(
+            paragraphs,
+            key=paragraph_score,
+            reverse=True,
+        )
+        paragraph = next((item for item in ranked if item not in used), ranked[0])
+        used.add(paragraph)
+        selected.append({"issue_id": str(issue["id"]), "excerpt": paragraph})
+    return selected
+
+
 def _parse_final_audit(text: str) -> dict[str, Any]:
     audit = _parse_json_output(text)
     if set(audit) != {"verdict", "issues", "summary"}:
@@ -877,6 +916,9 @@ class ResearchWorkflow:
                             "stage": "targeted_repair",
                         }
                         self.save(state)
+                        repair_context = _targeted_repair_context(
+                            current_draft, material_issues
+                        )
                         try:
                             repair_output = self.orchestrator.run_agent(
                                 self.project_id,
@@ -885,7 +927,9 @@ class ResearchWorkflow:
                                     "topic_title": topic["title"],
                                     "topic_id": topic_id,
                                     "section_title": spec.title,
-                                    "section_draft": current_draft,
+                                    "repair_context": json.dumps(
+                                        repair_context, ensure_ascii=False, indent=2
+                                    ),
                                     "repair_plan": json.dumps(
                                         repair_plan, ensure_ascii=False, indent=2
                                     ),

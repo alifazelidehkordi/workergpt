@@ -107,7 +107,8 @@ class FakeOrchestrator:
         elif agent_name == "research_section_repair":
             section = next(item.id for item in SECTIONS if item.title == context["section_title"])
             old_text = f"[1] https://doi.org/10.1000/{section}"
-            assert context["section_draft"].count(old_text) == 1
+            assert context["repair_context"].count(old_text) == 1
+            assert len(context["repair_context"]) < len(_section_markdown(section))
             repair_plan = json.loads(context["repair_plan"])
             content = "```json\n" + json.dumps(
                 {
