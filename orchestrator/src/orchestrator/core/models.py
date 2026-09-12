@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,11 +73,19 @@ class ProjectState:
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "ProjectState":
-        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 @dataclass
