@@ -19,6 +19,11 @@ RESEARCH_POLICY = """فقط مقالهٔ داوری‌شده، مرور نظام
 
 VALIDATION_POLICY = """پرونده باید frontmatter معتبر با status: complete، شش محور اصلی، جدول شواهد، منابع قابل‌ردیابی، شواهد منفی، شرایط مرزی، ایمنی، قانون عملیاتی و اصول کینتسوگی داشته باشد. هیچ TODO، placeholder، چک‌باکس خالی یا ادعای قطعی فراتر از شواهد پذیرفته نیست."""
 
+TOPIC_PLANNER_TIMEOUT_SECONDS = 180
+SECTION_RESEARCHER_TIMEOUT_SECONDS = 600
+SECTION_CRITIC_TIMEOUT_SECONDS = 300
+FINAL_CRITIC_TIMEOUT_SECONDS = 300
+
 
 @dataclass(frozen=True)
 class SectionSpec:
@@ -473,7 +478,7 @@ class ResearchWorkflow:
                         "topic_id": topic_id,
                         "topic_title": topic["title"],
                         "topic_excerpt": _topic_excerpt(original),
-                        "_timeout_seconds": 900,
+                        "_timeout_seconds": TOPIC_PLANNER_TIMEOUT_SECONDS,
                     },
                 )
             except Exception as exc:
@@ -540,7 +545,7 @@ class ResearchWorkflow:
                             "section_instructions": spec.instructions,
                             "section_plan": plan[spec.id],
                             "review_feedback": section.get("review_feedback", []),
-                            "_timeout_seconds": 900,
+                            "_timeout_seconds": SECTION_RESEARCHER_TIMEOUT_SECONDS,
                             "_web_search": True,
                         },
                     )
@@ -599,7 +604,7 @@ class ResearchWorkflow:
                             "section_title": spec.title,
                             "section_plan": plan[spec.id],
                             "section_draft": draft_path.read_text(encoding="utf-8"),
-                            "_timeout_seconds": 900,
+                            "_timeout_seconds": SECTION_CRITIC_TIMEOUT_SECONDS,
                             "_web_search": True,
                         },
                     )
@@ -667,7 +672,7 @@ class ResearchWorkflow:
                 {
                     "validation_policy": VALIDATION_POLICY,
                     "assembled_dossier": candidate,
-                    "_timeout_seconds": 900,
+                    "_timeout_seconds": FINAL_CRITIC_TIMEOUT_SECONDS,
                     "_web_search": True,
                 },
             )

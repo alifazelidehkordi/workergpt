@@ -6,7 +6,17 @@ import pytest
 
 from orchestrator.core.models import AgentOutput
 from orchestrator.agents.research_section import ResearchSectionAgent, ResearchSectionCriticAgent
-from orchestrator.research_workflow import ResearchWorkflow, SECTIONS, _parse_final_audit, _parse_section_review, _sha256
+from orchestrator.research_workflow import (
+    FINAL_CRITIC_TIMEOUT_SECONDS,
+    SECTION_CRITIC_TIMEOUT_SECONDS,
+    SECTION_RESEARCHER_TIMEOUT_SECONDS,
+    TOPIC_PLANNER_TIMEOUT_SECONDS,
+    ResearchWorkflow,
+    SECTIONS,
+    _parse_final_audit,
+    _parse_section_review,
+    _sha256,
+)
 
 
 def _topic(topic_id: str = "KSR-1", title: str = "آزمون") -> str:
@@ -124,6 +134,13 @@ def test_complete_run_preserves_reviews_and_commits_after_audit(workflow_env):
     assert len(list((workflow.artifacts_dir / "KSR-1").glob("*/critic_review.json"))) == 6
     assert [name for name, _ in fake.calls].count("research_file_critic") == 1
     assert [name for name, _ in fake.calls].count("research_topic_planner") == 1
+    expected_timeouts = {
+        "research_topic_planner": TOPIC_PLANNER_TIMEOUT_SECONDS,
+        "research_section": SECTION_RESEARCHER_TIMEOUT_SECONDS,
+        "research_section_critic": SECTION_CRITIC_TIMEOUT_SECONDS,
+        "research_file_critic": FINAL_CRITIC_TIMEOUT_SECONDS,
+    }
+    assert all(context["_timeout_seconds"] == expected_timeouts[name] for name, context in fake.calls)
     web_calls = [context for name, context in fake.calls if name in {"research_section", "research_section_critic", "research_file_critic"}]
     assert web_calls and all(context["_web_search"] is True for context in web_calls)
     section_calls = [context for name, context in fake.calls if name in {"research_section", "research_section_critic"}]
