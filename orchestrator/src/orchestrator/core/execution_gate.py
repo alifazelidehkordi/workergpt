@@ -1,9 +1,8 @@
-"""
-P0 execution gate.
+"""P0 execution gate.
 
 Small integration boundary between the orchestrator and safety policies.
-The orchestrator can call this before executor.execute() without coupling
-itself to individual guards.
+The orchestrator calls this before executor.execute() so expensive agent
+requests must pass duplicate-execution protection first.
 """
 
 from __future__ import annotations
@@ -24,8 +23,8 @@ class ExecutionGate:
         context: dict[str, Any],
         files: list[Path] | None = None,
     ) -> tuple[bool, str]:
-        decision = self.policy.check(
-            agent_name=agent_name,
+        decision = self.policy.allow_request(
+            agent=agent_name,
             context=context,
             files=files or [],
         )
@@ -38,9 +37,12 @@ class ExecutionGate:
         files: list[Path] | None = None,
         result: str = "executed",
     ) -> None:
-        self.policy.record(
-            agent_name=agent_name,
+        # Recompute the deterministic fingerprint from the same semantic input
+        # used by allow(). This intentionally does not depend on transient
+        # timestamps or executor metadata.
+        decision = self.policy.allow_request(
+            agent=agent_name,
             context=context,
             files=files or [],
-            result=result,
         )
+        self.policy.record_request(decision.fingerprint, result=result)
