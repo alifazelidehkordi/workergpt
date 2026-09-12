@@ -90,9 +90,9 @@ jobs:
           w = w.replace('self.orchestrator.run_agent(', 'self._run_agent(')
           workflow_path.write_text(w, encoding='utf-8')
           PY
-      - name: Install package
+      - name: Install package and tests
         working-directory: orchestrator
-        run: pip install -e .
+        run: pip install -e . pytest
       - name: Run full regression suite
         working-directory: orchestrator
         run: pytest -q
