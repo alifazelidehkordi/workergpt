@@ -104,6 +104,21 @@ class FakeOrchestrator:
             section = next(item.id for item in SECTIONS if item.title == context["section_title"])
             verdict = self.section_verdicts.pop(0) if self.section_verdicts else self.section_verdict
             content = _section_review(section, verdict)
+        elif agent_name == "research_section_repair":
+            section = next(item.id for item in SECTIONS if item.title == context["section_title"])
+            old_text = f"[1] https://doi.org/10.1000/{section}"
+            assert context["section_draft"].count(old_text) == 1
+            repair_plan = json.loads(context["repair_plan"])
+            content = "```json\n" + json.dumps(
+                {
+                    "patches": [{
+                        "issue_id": repair_plan["actions"][0]["issue_id"],
+                        "old_text": old_text,
+                        "new_text": old_text + " (بررسی‌شده)",
+                    }]
+                },
+                ensure_ascii=False,
+            ) + "\n```"
         else:
             content = self.audits.pop(0)
         return AgentOutput(agent_name=agent_name, success=True, content=content)
@@ -203,9 +218,10 @@ def test_section_revise_runs_fresh_research_and_critic(workflow_env):
 
     assert result["status"] == "complete"
     research_calls = [context for name, context in fake.calls if name == "research_section"]
-    assert len(research_calls) == 7
-    assert research_calls[1]["review_feedback"][0]["required_change"] == "منبع معتبر جایگزین شود"
-    assert '"actions"' in research_calls[1]["repair_plan"]
+    repair_calls = [context for name, context in fake.calls if name == "research_section_repair"]
+    assert len(research_calls) == 6
+    assert len(repair_calls) == 1
+    assert '"actions"' in repair_calls[0]["repair_plan"]
     revision_dir = workflow.artifacts_dir / "KSR-1" / "01_construct" / "revisions" / "section-attempt-1"
     assert (revision_dir / "draft.md").exists()
     assert (revision_dir / "critic_review.json").exists()

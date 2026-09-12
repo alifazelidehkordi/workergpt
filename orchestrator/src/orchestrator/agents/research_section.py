@@ -121,6 +121,35 @@ class ResearchSectionCriticAgent(BaseAgent):
 فقط وقتی issue مسدودکننده یا major وجود ندارد `pass` بده. Markdown اصلاح‌شده تولید نکن."""
 
 
+class ResearchSectionRepairAgent(BaseAgent):
+    name = "research_section_repair"
+    description = "Patch only the passages identified by the section critic"
+
+    def build_prompt(self, context: dict[str, Any]) -> str:
+        return f"""فقط قسمت‌های مشخص‌شده در برنامهٔ اصلاح را تعمیر کن؛ کل بخش را بازنویسی نکن.
+
+موضوع: {context.get('topic_title', '')}
+تیتر ثابت: {context.get('section_title', '')}
+
+برنامهٔ اصلاح مبتنی بر JSON منتقد:
+{context.get('repair_plan', '')}
+
+نسخهٔ فعلی بخش:
+<section>
+{context.get('section_draft', '')}
+</section>
+
+برای هر ایراد فقط یک قطعهٔ دقیق از متن فعلی را انتخاب کن. `old_text` باید عیناً و فقط یک بار در متن بالا وجود داشته باشد. `new_text` فقط جایگزین همان قطعه باشد و می‌تواند برای ادعای اصلاح‌شده ارجاع و منبع لازم را اضافه کند. تیتر، قسمت‌های سالم و ساختار کلی را تغییر نده. اگر ایراد با حذف ادعا حل می‌شود، `new_text` را نسخهٔ محدودشده یا حذف ایمن آن قرار بده.
+
+فقط یک بلوک JSON fenced برگردان:
+{{
+  "patches": [
+    {{"issue_id":"شناسهٔ ایراد","old_text":"نقل دقیق از متن فعلی","new_text":"متن جایگزین موضعی"}}
+  ]
+}}
+هیچ متن کامل Markdown، توضیح تغییرات یا حکم pass تولید نکن."""
+
+
 class ResearchFileCriticAgent(BaseAgent):
     name = "research_file_critic"
     description = "Final quality gate for a complete scientific dossier"

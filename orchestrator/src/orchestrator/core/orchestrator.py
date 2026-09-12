@@ -14,6 +14,7 @@ from orchestrator.agents import (
     ResearchFileCriticAgent,
     ResearchSectionAgent,
     ResearchSectionCriticAgent,
+    ResearchSectionRepairAgent,
     ResearchTopicPlannerAgent,
     ResearcherAgent,
     SynthesizerAgent,
@@ -41,6 +42,7 @@ class Orchestrator:
             "planner": PlannerAgent(),
             "research_section": ResearchSectionAgent(),
             "research_section_critic": ResearchSectionCriticAgent(),
+            "research_section_repair": ResearchSectionRepairAgent(),
             "research_file_critic": ResearchFileCriticAgent(),
             "research_topic_planner": ResearchTopicPlannerAgent(),
         }

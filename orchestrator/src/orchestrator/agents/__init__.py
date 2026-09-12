@@ -8,6 +8,7 @@ from orchestrator.agents.research_section import (
     ResearchFileCriticAgent,
     ResearchSectionAgent,
     ResearchSectionCriticAgent,
+    ResearchSectionRepairAgent,
     ResearchTopicPlannerAgent,
 )
 from orchestrator.agents.synthesizer import SynthesizerAgent
@@ -20,6 +21,7 @@ __all__ = [
     "PlannerAgent",
     "ResearchSectionAgent",
     "ResearchSectionCriticAgent",
+    "ResearchSectionRepairAgent",
     "ResearchFileCriticAgent",
     "ResearchTopicPlannerAgent",
 ]

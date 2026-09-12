@@ -26,7 +26,7 @@ TOPIC_PLANNER_TIMEOUT_SECONDS = 900
 SECTION_RESEARCHER_TIMEOUT_SECONDS = 1800
 SECTION_CRITIC_TIMEOUT_SECONDS = 900
 FINAL_CRITIC_TIMEOUT_SECONDS = 900
-REAL_MIN_SECTION_REVISIONS = 8
+REAL_MIN_SECTION_REVISIONS = 4
 REAL_MIN_FINAL_REVISIONS = 4
 
 
@@ -183,6 +183,40 @@ def _parse_section_review(text: str) -> dict[str, Any]:
     if review["verdict"] == "revise" and not material:
         raise ValueError("A revise verdict requires a blocking or major issue")
     return review
+
+
+def _parse_repair_patches(text: str, expected_issue_ids: set[str]) -> list[dict[str, str]]:
+    payload = _parse_json_output(text)
+    if set(payload) != {"patches"} or not isinstance(payload["patches"], list):
+        raise ValueError("Repair agent must return only a patches list")
+    patches: list[dict[str, str]] = []
+    for patch in payload["patches"]:
+        if not isinstance(patch, dict) or set(patch) != {"issue_id", "old_text", "new_text"}:
+            raise ValueError("Invalid targeted repair patch schema")
+        if patch["issue_id"] not in expected_issue_ids:
+            raise ValueError("Repair patch references an unknown critic issue")
+        if not isinstance(patch["old_text"], str) or not patch["old_text"].strip():
+            raise ValueError("Repair patch old_text must be non-empty")
+        if not isinstance(patch["new_text"], str):
+            raise ValueError("Repair patch new_text must be text")
+        patches.append(patch)
+    if {patch["issue_id"] for patch in patches} != expected_issue_ids:
+        raise ValueError("Repair patches must address every material critic issue")
+    return patches
+
+
+def _apply_targeted_patches(draft: str, patches: list[dict[str, str]]) -> str:
+    updated = draft
+    for patch in patches:
+        old_text = patch["old_text"]
+        if updated.count(old_text) != 1:
+            raise ValueError(
+                f"Targeted patch {patch['issue_id']} old_text must occur exactly once"
+            )
+        if len(old_text) > max(1200, len(updated) // 2):
+            raise ValueError("Targeted patch is too broad and would rewrite the section")
+        updated = updated.replace(old_text, patch["new_text"], 1)
+    return updated.strip() + "\n"
 
 
 def _parse_final_audit(text: str) -> dict[str, Any]:
@@ -464,7 +498,14 @@ class ResearchWorkflow:
         artifact_dir = self._artifact_dir(topic_id, section_id)
         revision_dir = artifact_dir / "revisions" / f"section-attempt-{attempt}"
         hashes: dict[str, str] = {}
-        for name in ("research_response.txt", "draft.md", "approved.md", "critic_response.txt", "critic_review.json"):
+        for name in (
+            "research_response.txt",
+            "draft.md",
+            "approved.md",
+            "critic_response.txt",
+            "critic_review.json",
+            "repair_response.txt",
+        ):
             source = artifact_dir / name
             if source.exists():
                 content = source.read_text(encoding="utf-8")
@@ -815,13 +856,83 @@ class ResearchWorkflow:
                     section["review_feedback"] = repair_plan["actions"]
                     attempt = int(section.get("section_revision_attempts", 0)) + 1
                     if attempt <= max_section_revisions:
+                        current_draft = draft_path.read_text(encoding="utf-8")
+                        state["active"] = {
+                            "topic": topic_id,
+                            "section": spec.id,
+                            "stage": "targeted_repair",
+                        }
+                        self.save(state)
+                        try:
+                            repair_output = self.orchestrator.run_agent(
+                                self.project_id,
+                                "research_section_repair",
+                                {
+                                    "topic_title": topic["title"],
+                                    "topic_id": topic_id,
+                                    "section_title": spec.title,
+                                    "section_draft": current_draft,
+                                    "repair_plan": json.dumps(
+                                        repair_plan, ensure_ascii=False, indent=2
+                                    ),
+                                    "_timeout_seconds": SECTION_RESEARCHER_TIMEOUT_SECONDS,
+                                    "_web_search": True,
+                                },
+                            )
+                        except Exception as exc:
+                            self._record_failure(
+                                state, topic_id, f"{spec.id}:targeted_repair_exception", str(exc)
+                            )
+                            return {"topic": topic_id, "status": "paused", "error": str(exc)}
+                        if not repair_output.success:
+                            self._record_failure(
+                                state,
+                                topic_id,
+                                f"{spec.id}:targeted_repair",
+                                repair_output.content,
+                            )
+                            return {
+                                "topic": topic_id,
+                                "status": "paused",
+                                "error": repair_output.content,
+                            }
+                        _atomic_write(artifact_dir / "repair_response.txt", repair_output.content)
+                        try:
+                            patches = _parse_repair_patches(
+                                repair_output.content,
+                                {str(item["id"]) for item in material_issues},
+                            )
+                            repaired_draft = _apply_targeted_patches(current_draft, patches)
+                        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                            self._record_failure(
+                                state, topic_id, f"{spec.id}:targeted_repair_parse", str(exc)
+                            )
+                            return {"topic": topic_id, "status": "paused", "error": str(exc)}
+                        local_repair_issues = _validate_section_content(spec, repaired_draft)
+                        if local_repair_issues:
+                            self._record_failure(
+                                state,
+                                topic_id,
+                                f"{spec.id}:targeted_repair_validation",
+                                "; ".join(local_repair_issues),
+                            )
+                            return {
+                                "topic": topic_id,
+                                "status": "paused",
+                                "error": "; ".join(local_repair_issues),
+                            }
                         self._archive_section_attempt(
                             state,
                             topic_id,
                             spec.id,
                             repair_plan["actions"],
-                            "critic_revise",
+                            "critic_targeted_repair",
                         )
+                        _atomic_write(draft_path, repaired_draft)
+                        section["draft"] = str(draft_path.relative_to(self.project_dir))
+                        section["draft_hash"] = _sha256(repaired_draft)
+                        section["status"] = "researched"
+                        self.save(state)
                         return self._run_topic_claimed(
                             topic_id,
                             max_sections=max_sections,
