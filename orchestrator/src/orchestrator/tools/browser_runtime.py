@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from .response_state import ResponseObservation, ResponseState, ResponseStateMachine
+
 CHATGPT_URL = "https://chatgpt.com/?temporary-chat=true"
 EDITOR_SELECTORS = (
     "#prompt-textarea",
@@ -278,6 +280,8 @@ class PatchrightChatGPTSession:
         self._page: Any | None = None
         self._profile_lock: TextIO | None = None
         self._last_prompt = ""
+        self._state = "created"
+        self._response_state = ResponseState.WAITING
 
     @property
     def page(self) -> Any:
@@ -291,6 +295,7 @@ class PatchrightChatGPTSession:
         self.options.profile_dir.mkdir(parents=True, exist_ok=True)
         self.options.download_dir.mkdir(parents=True, exist_ok=True)
         self._acquire_profile_lock()
+        self._state = "starting"
         try:
             sync_api = _load_patchright()
             self._playwright = sync_api.sync_playwright().start()
@@ -320,7 +325,9 @@ class PatchrightChatGPTSession:
             pages = list(self._context.pages)
             self._page = pages[0] if pages else self._context.new_page()
             self._page.goto(self.options.url, wait_until="domcontentloaded")
+            self._state = "ready"
         except Exception:
+            self._state = "failed"
             self.close()
             raise
 
@@ -368,6 +375,22 @@ class PatchrightChatGPTSession:
             finally:
                 self._playwright = None
                 self._release_profile_lock()
+                self._state = "closed"
+
+    @property
+    def state(self) -> str:
+        """Lifecycle state for diagnostics and recovery controllers."""
+        return self._state
+
+    def health(self) -> dict[str, Any]:
+        """Return a provider-neutral health snapshot without touching the UI."""
+        return {
+            "state": self._state,
+            "profile": str(self.options.profile_dir),
+            "page_open": self._page is not None,
+            "authenticated": self._page is not None and self._state in {"ready", "sending", "generating"},
+            "response_state": self._response_state.value,
+        }
 
     def is_authenticated(self) -> bool:
         self.open()
@@ -442,6 +465,7 @@ class PatchrightChatGPTSession:
         prompt = text.strip()
         if not prompt:
             raise ValueError("Prompt cannot be empty")
+        self._state = "sending"
         editor = _wait_for_visible(
             self.page,
             EDITOR_SELECTORS,
@@ -473,6 +497,11 @@ class PatchrightChatGPTSession:
         seen_response = False
         stable_since: float | None = None
         last_text = ""
+        state_machine = ResponseStateMachine(
+            required_assistant_count=before_count + 1,
+            stable_seconds=COMPLETION_STABILITY_SECONDS,
+        )
+        self._state = "generating"
         while time.monotonic() < hard_deadline:
             for selector in ("[role='alert']", "[role='dialog']", "[data-testid*='toast']"):
                 try:
@@ -483,6 +512,7 @@ class PatchrightChatGPTSession:
                             continue
                         notice_text = notice.inner_text(timeout=500).strip()
                         if _contains_rate_limit(notice_text, self._last_prompt):
+                            self._response_state = ResponseState.RATE_LIMITED
                             return "__ORCHESTRATOR_RATE_LIMIT__\n" + notice_text
                         if _contains_provider_error(notice_text, self._last_prompt):
                             raise ProviderResponseError(notice_text)
@@ -501,6 +531,15 @@ class PatchrightChatGPTSession:
                 if _contains_provider_error(current, self._last_prompt):
                     raise ProviderResponseError(current)
                 generating = _visible(self.page, STOP_BUTTON_SELECTORS) is not None
+                observed_state = state_machine.observe(
+                    ResponseObservation(
+                        assistant_count=count,
+                        generating=generating,
+                        body_text=current,
+                        now=time.monotonic(),
+                    )
+                )
+                self._response_state = observed_state
                 if current != last_text:
                     last_text = current
                     stable_since = None
@@ -512,14 +551,17 @@ class PatchrightChatGPTSession:
                         stable_since = None
                     else:
                         stable_since = stable_since or time.monotonic()
-                        if time.monotonic() - stable_since >= COMPLETION_STABILITY_SECONDS:
+                        if observed_state is ResponseState.STABLE and time.monotonic() - stable_since >= COMPLETION_STABILITY_SECONDS:
                             if _contains_rate_limit(current, self._last_prompt):
+                                self._response_state = ResponseState.RATE_LIMITED
                                 return "__ORCHESTRATOR_RATE_LIMIT__\n" + current
+                            self._state = "ready"
                             return current
             if time.monotonic() >= activity_deadline and not seen_response:
                 raise TimeoutError("ChatGPT did not start responding before the activity timeout")
             time.sleep(0.5)
         if seen_response:
+            self._state = "failed"
             raise ResponseIncompleteTimeoutError(
                 f"Timed out after {timeout_seconds}s before the ChatGPT response completed; "
                 "partial output was discarded"
