@@ -21,6 +21,7 @@ from orchestrator.agents import (
 )
 from orchestrator.core.execution_gate import ExecutionGate
 from orchestrator.core.models import AgentOutput, ProjectState
+from orchestrator.core.progress_guard import PersistentProgressGuard, ProgressDecision
 from orchestrator.tools.chatgpt_web import ChatGPTWebExecutor
 
 
@@ -125,14 +126,7 @@ class Orchestrator:
         state: ProjectState,
         context: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Return stable semantic input for duplicate detection.
-
-        Volatile values such as timestamps, active_agent, notes, and executor
-        metadata are deliberately excluded. Meaningful workflow progress is
-        included so the same agent/input can run again after state advances.
-        P0's own bookkeeping is excluded so a blocked request remains blocked
-        on the third, fourth, and later identical attempts.
-        """
+        """Return stable semantic input for exact duplicate detection."""
         semantic_progress = {
             key: value
             for key, value in state.progress.items()
@@ -147,6 +141,66 @@ class Orchestrator:
             "input": context or {},
         }
 
+    @staticmethod
+    def _progress_guard_context(
+        project_id: str,
+        state: ProjectState,
+        context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return a stable action scope for logical-loop detection.
+
+        Iteration-specific prompt fields remain available to the evaluator, but
+        scope selection in PersistentProgressGuard intentionally uses stable
+        identifiers such as topic/section/question plus an optional strategy id.
+        """
+        return {
+            **(context or {}),
+            "project_id": project_id,
+            "current_phase": state.current_phase,
+            "current_module": state.current_module,
+        }
+
+    def _block_for_stagnation(
+        self,
+        project_id: str,
+        state: ProjectState,
+        agent_name: str,
+        decision: ProgressDecision,
+        *,
+        last_output: str | None = None,
+    ) -> AgentOutput:
+        state.active_agent = None
+        state.status = "paused_no_progress"
+        state.progress["p0_stop"] = {
+            "agent": agent_name,
+            "reason": "no_measurable_progress",
+            "stagnant_count": decision.stagnant_count,
+            "scope_key": decision.key,
+            "last_output": last_output,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        state.notes = (
+            f"P0 stopped {agent_name}: no measurable progress after "
+            f"{decision.stagnant_count} stagnant attempts"
+        )
+        self.save_state(project_id, state)
+        return AgentOutput(
+            agent_name=agent_name,
+            success=False,
+            content=(
+                "Execution stopped by P0 stagnation guard: "
+                "no_measurable_progress"
+            ),
+            needs_review=True,
+            metadata={
+                "blocked_by": "p0_stagnation_guard",
+                "reason": "no_measurable_progress",
+                "stagnant_count": decision.stagnant_count,
+                "scope_key": decision.key,
+                "last_output": last_output,
+            },
+        )
+
     def run_agent(
         self,
         project_id: str,
@@ -158,8 +212,21 @@ class Orchestrator:
             raise ValueError(f"Unknown agent: {agent_name}")
 
         state = self.load_state(project_id)
+        checkpoint_dir = self.projects_dir / project_id / "checkpoints"
+        progress_context = self._progress_guard_context(project_id, state, context)
+        progress_guard = PersistentProgressGuard(checkpoint_dir / "progress_state.json")
+
+        prior_progress = progress_guard.check(agent_name, progress_context)
+        if prior_progress.should_stop:
+            return self._block_for_stagnation(
+                project_id,
+                state,
+                agent_name,
+                prior_progress,
+            )
+
         guard_context = self._execution_guard_context(project_id, state, context)
-        gate = ExecutionGate(self.projects_dir / project_id / "checkpoints" / "request_cache.json")
+        gate = ExecutionGate(checkpoint_dir / "request_cache.json")
         allowed, gate_reason = gate.allow(agent_name, guard_context, files)
         if not allowed:
             state.active_agent = None
@@ -196,20 +263,34 @@ class Orchestrator:
             full_context.update(context)
         agent = self.agents[agent_name]
         result = self.executor.execute(agent.create_request(full_context, files=files))
-        output = agent.process_result(result, full_context)
+        raw_output = agent.process_result(result, full_context)
 
-        # Rate-limit interruptions are intentionally not cached so resume_last()
-        # may replay the same logical request. Other completed attempts are
-        # recorded before any future identical action can reach the executor.
+        progress_decision: ProgressDecision | None = None
         if not result.limit_hit:
             gate.record(
                 agent_name,
                 guard_context,
                 files,
-                result="success" if output.success else "failed",
+                result="success" if raw_output.success else "failed",
+            )
+            progress_decision = progress_guard.record_result(
+                agent_name,
+                progress_context,
+                raw_output,
             )
 
-        self._save_agent_output(project_id, agent_name, output)
+        saved_path = self._save_agent_output(project_id, agent_name, raw_output)
+        saved_relative = str(saved_path.relative_to(self.projects_dir / project_id))
+
+        if progress_decision is not None and progress_decision.should_stop:
+            state = self.load_state(project_id)
+            return self._block_for_stagnation(
+                project_id,
+                state,
+                agent_name,
+                progress_decision,
+                last_output=saved_relative,
+            )
 
         state = self.load_state(project_id)
         if result.limit_hit:
@@ -224,15 +305,17 @@ class Orchestrator:
             state.last_checkpoint = str(resume_path.relative_to(self.projects_dir / project_id))
             state.progress["resume_pending"] = True
             state.notes = f"Paused during {agent_name}: ChatGPT usage/rate limit"
-        elif output.success:
+        elif raw_output.success:
             state.status = "in_progress"
             state.notes = f"Last successful agent: {agent_name}"
+            if progress_decision and progress_decision.measurable_progress:
+                state.progress.pop("p0_stop", None)
         else:
             state.status = "paused"
-            state.notes = f"Agent failed: {agent_name}: {output.content[:300]}"
+            state.notes = f"Agent failed: {agent_name}: {raw_output.content[:300]}"
         state.active_agent = None
         self.save_state(project_id, state)
-        return output
+        return raw_output
 
     def resume_last(self, project_id: str) -> AgentOutput:
         checkpoint_dir = self.projects_dir / project_id / "checkpoints"
