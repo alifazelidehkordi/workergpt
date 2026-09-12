@@ -382,6 +382,26 @@ class PatchrightChatGPTSession:
         """Lifecycle state for diagnostics and recovery controllers."""
         return self._state
 
+    def is_alive(self) -> bool:
+        """Return whether the browser context and active page are usable."""
+        if self._context is None or self._page is None or self._state == "closed":
+            return False
+        try:
+            return not bool(self._page.is_closed())
+        except Exception:
+            return True
+
+    def recover(self, reason: str = "") -> bool:
+        """Recreate a failed session while retaining the same profile lease policy."""
+        try:
+            self.close()
+            self.open()
+            self.assert_authenticated()
+            return True
+        except Exception:
+            self._state = "failed"
+            return False
+
     def health(self) -> dict[str, Any]:
         """Return a provider-neutral health snapshot without touching the UI."""
         return {

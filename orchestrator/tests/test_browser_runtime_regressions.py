@@ -43,6 +43,11 @@ def test_browser_health_reports_closed_session(tmp_path):
     assert health["response_state"] == "waiting"
 
 
+def test_browser_is_alive_requires_open_page(tmp_path):
+    session = runtime.PatchrightChatGPTSession(_options(tmp_path))
+    assert session.is_alive() is False
+
+
 @pytest.mark.parametrize(
     "message",
     [
