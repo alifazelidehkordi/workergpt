@@ -22,10 +22,10 @@ RESEARCH_POLICY = """فقط مقالهٔ داوری‌شده، مرور نظام
 
 VALIDATION_POLICY = """پرونده باید frontmatter معتبر با status: complete، شش محور اصلی، جدول شواهد، منابع قابل‌ردیابی، شواهد منفی، شرایط مرزی، ایمنی، قانون عملیاتی و اصول کینتسوگی داشته باشد. هیچ TODO، placeholder، چک‌باکس خالی یا ادعای قطعی فراتر از شواهد پذیرفته نیست."""
 
-TOPIC_PLANNER_TIMEOUT_SECONDS = 180
-SECTION_RESEARCHER_TIMEOUT_SECONDS = 600
-SECTION_CRITIC_TIMEOUT_SECONDS = 300
-FINAL_CRITIC_TIMEOUT_SECONDS = 300
+TOPIC_PLANNER_TIMEOUT_SECONDS = 900
+SECTION_RESEARCHER_TIMEOUT_SECONDS = 1800
+SECTION_CRITIC_TIMEOUT_SECONDS = 900
+FINAL_CRITIC_TIMEOUT_SECONDS = 900
 
 
 @dataclass(frozen=True)
