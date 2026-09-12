@@ -20,6 +20,7 @@ from orchestrator.agents import (
     SynthesizerAgent,
 )
 from orchestrator.core.execution_gate import ExecutionGate
+from orchestrator.core.evaluation import TaskEvaluator
 from orchestrator.core.failure_memory import FailureMemory, RetryDecision
 from orchestrator.core.models import AgentOutput, ProjectState
 from orchestrator.core.progress_guard import PersistentProgressGuard, ProgressDecision
@@ -40,6 +41,7 @@ class Orchestrator:
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.executor = ChatGPTWebExecutor(use_mock=use_mock_executor, **(executor_options or {}))
         self.retry_policy = RetryPolicy()
+        self.task_evaluator = TaskEvaluator()
         self.agents = {
             "researcher": ResearcherAgent(),
             "critic": CriticAgent(),
@@ -434,6 +436,14 @@ class Orchestrator:
         agent = self.agents[agent_name]
         result = self.executor.execute(agent.create_request(full_context, files=files))
         raw_output = agent.process_result(result, full_context)
+        raw_output.metadata["execution_success"] = bool(result.success)
+        raw_output.metadata["agent_output_success"] = bool(raw_output.success)
+        task_evaluation = self.task_evaluator.evaluate(
+            raw_output,
+            full_context,
+            execution_success=bool(result.success),
+        )
+        raw_output.metadata["task_evaluation"] = task_evaluation.to_dict()
 
         progress_decision: ProgressDecision | None = None
         if not result.limit_hit:
