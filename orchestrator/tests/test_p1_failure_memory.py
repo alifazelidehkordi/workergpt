@@ -144,7 +144,7 @@ def test_orchestrator_blocks_third_same_strategy_failure_before_executor(tmp_pat
         "researcher",
         {**base, "attempt": 4, "_strategy_id": "schema-repair-v2"},
     )
-    assert changed_strategy.metadata["blocked_by"] if "blocked_by" in changed_strategy.metadata else None is None
+    assert "blocked_by" not in changed_strategy.metadata
     assert changed_strategy.metadata["failure"]["strategy_id"] == "schema-repair-v2"
     assert calls == 3
 
