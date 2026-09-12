@@ -1,7 +1,8 @@
 """P2 regression tests for execution/task outcome separation."""
 
 from orchestrator.core.evaluation import EvaluationStatus, TaskEvaluator
-from orchestrator.core.models import AgentOutput
+from orchestrator.core.models import AgentOutput, ExecuteResult
+from orchestrator.core.orchestrator import Orchestrator
 
 
 def _output(content: str = "answer", *, success: bool = True) -> AgentOutput:
@@ -119,3 +120,73 @@ def test_invalid_contract_is_unassessed_not_false_success():
     assert evaluation.status == EvaluationStatus.UNASSESSED
     assert evaluation.task_success is None
     assert evaluation.reason == "invalid_evaluation_contract"
+
+
+def test_orchestrator_records_execution_and_task_outcomes_separately(tmp_path):
+    orchestrator = Orchestrator(tmp_path, use_mock_executor=True)
+    orchestrator.create_project("p2-separation", "P2 Separation")
+    orchestrator.executor.execute = lambda _request: ExecuteResult(
+        success=True,
+        text_response="A plausible research answer without an explicit evaluator contract.",
+    )
+
+    output = orchestrator.run_agent(
+        "p2-separation",
+        "researcher",
+        {"research_question": "What is the answer?"},
+    )
+
+    assert output.success is True
+    assert output.metadata["execution_success"] is True
+    assert output.metadata["agent_output_success"] is True
+    assert output.metadata["task_evaluation"]["status"] == "unassessed"
+    assert output.metadata["task_evaluation"]["task_success"] is None
+    assert output.metadata["task_evaluation"]["reason"] == "no_evaluation_contract"
+
+
+def test_failed_task_contract_does_not_masquerade_as_execution_failure(tmp_path):
+    orchestrator = Orchestrator(tmp_path, use_mock_executor=True)
+    orchestrator.create_project("p2-contract", "P2 Contract")
+    orchestrator.executor.execute = lambda _request: ExecuteResult(
+        success=True,
+        text_response="This transport call completed successfully.",
+    )
+
+    output = orchestrator.run_agent(
+        "p2-contract",
+        "researcher",
+        {
+            "research_question": "Return an answer with a citation.",
+            "_evaluation_contract": {"required_terms": ["citation"]},
+        },
+    )
+
+    # P2.1 records the distinction but intentionally does not gate the workflow yet.
+    assert output.success is True
+    assert output.metadata["execution_success"] is True
+    assert output.metadata["agent_output_success"] is True
+    assert output.metadata["task_evaluation"]["status"] == "failed"
+    assert output.metadata["task_evaluation"]["task_success"] is False
+    assert output.metadata["task_evaluation"]["reason"] == "evaluation_contract_failed"
+
+
+def test_executor_failure_records_failed_execution_and_task_outcome(tmp_path):
+    orchestrator = Orchestrator(tmp_path, use_mock_executor=True)
+    orchestrator.create_project("p2-exec-fail", "P2 Execution Failure")
+    orchestrator.executor.execute = lambda _request: ExecuteResult(
+        success=False,
+        error="connection reset by peer",
+    )
+
+    output = orchestrator.run_agent(
+        "p2-exec-fail",
+        "researcher",
+        {"research_question": "question"},
+    )
+
+    assert output.success is False
+    assert output.metadata["execution_success"] is False
+    assert output.metadata["agent_output_success"] is False
+    assert output.metadata["task_evaluation"]["status"] == "failed"
+    assert output.metadata["task_evaluation"]["task_success"] is False
+    assert output.metadata["task_evaluation"]["reason"] == "execution_failed"
