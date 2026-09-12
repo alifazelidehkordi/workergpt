@@ -8,6 +8,7 @@ import orchestrator.tools.browser_runtime as runtime
 from orchestrator.agents.base import BaseAgent
 from orchestrator.core.models import ExecuteRequest
 from orchestrator.tools.chatgpt_web import RealChatGPTWebExecutor
+from orchestrator.tools.response_state import ResponseObservation, ResponseState, ResponseStateMachine
 
 
 def _options(tmp_path: Path, timeout_seconds: int = 300) -> runtime.BrowserOptions:
@@ -23,6 +24,23 @@ def test_rate_limit_detection_removes_the_submitted_prompt():
 
     assert runtime._contains_rate_limit(prompt, prompt) is False
     assert runtime._contains_rate_limit(prompt + "\nYou've reached the limit.", prompt) is True
+
+
+def test_response_state_machine_requires_unchanged_quiet_window():
+    machine = ResponseStateMachine(required_assistant_count=1, stable_seconds=3.0)
+    assert machine.observe(ResponseObservation(1, True, "draft", now=0.0)) is ResponseState.GENERATING
+    assert machine.observe(ResponseObservation(1, False, "final", now=1.0)) is ResponseState.WAITING
+    assert machine.observe(ResponseObservation(1, False, "final", now=3.9)) is ResponseState.WAITING
+    assert machine.observe(ResponseObservation(1, False, "final", now=6.8)) is ResponseState.WAITING
+    assert machine.observe(ResponseObservation(1, False, "final", now=7.1)) is ResponseState.STABLE
+
+
+def test_browser_health_reports_closed_session(tmp_path):
+    session = runtime.PatchrightChatGPTSession(_options(tmp_path))
+    assert session.state == "created"
+    health = session.health()
+    assert health["page_open"] is False
+    assert health["response_state"] == "waiting"
 
 
 @pytest.mark.parametrize(
