@@ -331,6 +331,18 @@ class ResearchWorkflow:
         self._topic_locks: dict[str, TextIO] = {}
         self._claimed_topic: str | None = None
 
+    def _run_agent(
+        self,
+        project_id: str,
+        agent_name: str,
+        context: dict[str, Any],
+    ):
+        """Route durable workflow calls through bounded P1 retries when available."""
+        controlled = getattr(self.orchestrator, "run_agent_with_retries", None)
+        if callable(controlled):
+            return controlled(project_id, agent_name, context)
+        return self.orchestrator.run_agent(project_id, agent_name, context)
+
     def initialize(
         self,
         vault_dir: Path,
@@ -656,7 +668,7 @@ class ResearchWorkflow:
                 "stage": "final_targeted_repair",
             }
             self.save(state)
-            repair_output = self.orchestrator.run_agent(
+            repair_output = self._run_agent(
                 self.project_id,
                 "research_section_repair",
                 {
@@ -780,7 +792,7 @@ class ResearchWorkflow:
             state["active"] = {"topic": topic_id, "stage": "planning"}
             self.save(state)
             try:
-                plan_output = self.orchestrator.run_agent(
+                plan_output = self._run_agent(
                     self.project_id,
                     "research_topic_planner",
                     {
@@ -870,7 +882,7 @@ class ResearchWorkflow:
                     if repair_plan_path.is_file():
                         repair_plan_content = repair_plan_path.read_text(encoding="utf-8")
                 try:
-                    output = self.orchestrator.run_agent(
+                    output = self._run_agent(
                         self.project_id,
                         "research_section",
                         {
@@ -932,7 +944,7 @@ class ResearchWorkflow:
                 section["status"] = "criticizing"
                 self.save(state)
                 try:
-                    output = self.orchestrator.run_agent(
+                    output = self._run_agent(
                         self.project_id,
                         "research_section_critic",
                         {
@@ -1010,7 +1022,7 @@ class ResearchWorkflow:
                             current_draft, material_issues
                         )
                         try:
-                            repair_output = self.orchestrator.run_agent(
+                            repair_output = self._run_agent(
                                 self.project_id,
                                 "research_section_repair",
                                 {
@@ -1120,7 +1132,7 @@ class ResearchWorkflow:
         state["active"] = {"topic": topic_id, "stage": "final_critic"}
         self.save(state)
         try:
-            audit_output = self.orchestrator.run_agent(
+            audit_output = self._run_agent(
                 self.project_id,
                 "research_file_critic",
                 {

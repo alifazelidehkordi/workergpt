@@ -24,6 +24,7 @@ from orchestrator.core.failure_memory import FailureMemory, RetryDecision
 from orchestrator.core.models import AgentOutput, ProjectState
 from orchestrator.core.progress_guard import PersistentProgressGuard, ProgressDecision
 from orchestrator.core.retry_policy import RetryAction, RetryPolicy, RetryPolicyDecision
+from orchestrator.core.retry_execution import RetryExecutionController
 from orchestrator.tools.chatgpt_web import ChatGPTWebExecutor
 
 
@@ -72,7 +73,7 @@ class Orchestrator:
             (project_path / sub).mkdir(parents=True)
         created = datetime.now(UTC).strftime("%Y-%m-%d")
         (project_path / "project.toml").write_text(
-            f'''[project]\nid = "{project_id}"\nname = "{name}"\ndescription = "{description}"\ncreated = "{created}"\nstatus = "active"\n''',
+            f'''[project]\nid = "{project_id}"\nname = "{name}"\ndescription = "{description}"\ncreated = "{created}"\nstatus = "active"\n\n[settings]\nmax_retries = 3\nauto_checkpoint = true\n''',
             encoding="utf-8",
         )
         (project_path / "definition.md").write_text(
@@ -340,6 +341,22 @@ class Orchestrator:
             state.status = "paused_terminal"
             state.notes = f"P1 stopped {agent_name}: {policy_decision.reason}"
 
+    def run_agent_with_retries(
+        self,
+        project_id: str,
+        agent_name: str,
+        context: dict[str, Any] | None = None,
+        files: list[Path] | None = None,
+        *,
+        sleeper: Any | None = None,
+    ) -> AgentOutput:
+        """Execute explicit bounded retries under the persistent P1 budget."""
+        kwargs: dict[str, Any] = {}
+        if sleeper is not None:
+            kwargs["sleeper"] = sleeper
+        controller = RetryExecutionController(self, project_id, **kwargs)
+        return controller.execute(agent_name, context, files=files)
+
     def run_agent(
         self,
         project_id: str,
@@ -527,7 +544,7 @@ class Orchestrator:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("completed"):
             raise RuntimeError("Latest resume checkpoint is already completed")
-        output = self.run_agent(
+        output = self.run_agent_with_retries(
             project_id,
             str(payload["agent_name"]),
             context=dict(payload.get("context") or {}),
@@ -617,24 +634,32 @@ class Orchestrator:
         run_checkpoint: bool = True,
     ) -> dict[str, AgentOutput]:
         results: dict[str, AgentOutput] = {}
-        research = self.research(project_id, question, goal)
+        research = self.run_agent_with_retries(
+            project_id,
+            "researcher",
+            {"research_question": question, "goal": goal or "Rigorous research"},
+        )
         results["researcher"] = research
         if not research.success:
             return results
 
         critique_text = ""
         if run_critic:
-            critique = self.critique(project_id, research.content)
+            critique = self.run_agent_with_retries(
+                project_id,
+                "critic",
+                {"content_to_critique": research.content},
+            )
             results["critic"] = critique
             if not critique.success:
                 return results
             critique_text = critique.content
 
         if run_synthesizer:
-            synthesis = self.synthesize(
+            synthesis = self.run_agent_with_retries(
                 project_id,
-                research.content,
-                critique_text,
+                "synthesizer",
+                {"research_report": research.content, "critique": critique_text},
             )
             results["synthesizer"] = synthesis
             if not synthesis.success:
@@ -645,7 +670,15 @@ class Orchestrator:
                 f"### {name.title()}\n{output.content[:1500]}"
                 for name, output in results.items()
             )
-            checkpoint = self.create_checkpoint(project_id, recent)
+            checkpoint = self.run_agent_with_retries(
+                project_id,
+                "checkpoint",
+                {"recent_outputs": recent},
+            )
+            if checkpoint.success:
+                checkpoint_state = self.load_state(project_id)
+                checkpoint_state.last_checkpoint = datetime.now(UTC).isoformat()
+                self.save_state(project_id, checkpoint_state)
             results["checkpoint"] = checkpoint
             if not checkpoint.success:
                 return results
