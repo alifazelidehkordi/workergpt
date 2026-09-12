@@ -20,6 +20,7 @@ from orchestrator.agents import (
     SynthesizerAgent,
 )
 from orchestrator.core.execution_gate import ExecutionGate
+from orchestrator.core.failure_memory import FailureMemory, RetryDecision
 from orchestrator.core.models import AgentOutput, ProjectState
 from orchestrator.core.progress_guard import PersistentProgressGuard, ProgressDecision
 from orchestrator.tools.chatgpt_web import ChatGPTWebExecutor
@@ -130,7 +131,7 @@ class Orchestrator:
         semantic_progress = {
             key: value
             for key, value in state.progress.items()
-            if not key.startswith("p0_") and key != "resume_pending"
+            if not key.startswith("p0_") and not key.startswith("p1_") and key != "resume_pending"
         }
         return {
             "project_id": project_id,
@@ -147,18 +148,30 @@ class Orchestrator:
         state: ProjectState,
         context: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Return a stable action scope for logical-loop detection.
-
-        Iteration-specific prompt fields remain available to the evaluator, but
-        scope selection in PersistentProgressGuard intentionally uses stable
-        identifiers such as topic/section/question plus an optional strategy id.
-        """
+        """Return a stable action scope for logical-loop detection."""
         return {
             **(context or {}),
             "project_id": project_id,
             "current_phase": state.current_phase,
             "current_module": state.current_module,
         }
+
+    @staticmethod
+    def _failure_context(
+        project_id: str,
+        state: ProjectState,
+        context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return stable P1 failure scope while preserving explicit strategy id."""
+        value = {
+            **(context or {}),
+            "project_id": project_id,
+            "current_phase": state.current_phase,
+            "current_module": state.current_module,
+        }
+        if value.get("_workflow_stage") and not value.get("workflow_stage"):
+            value["workflow_stage"] = value["_workflow_stage"]
+        return value
 
     def _block_for_stagnation(
         self,
@@ -187,10 +200,7 @@ class Orchestrator:
         return AgentOutput(
             agent_name=agent_name,
             success=False,
-            content=(
-                "Execution stopped by P0 stagnation guard: "
-                "no_measurable_progress"
-            ),
+            content="Execution stopped by P0 stagnation guard: no_measurable_progress",
             needs_review=True,
             metadata={
                 "blocked_by": "p0_stagnation_guard",
@@ -198,6 +208,51 @@ class Orchestrator:
                 "stagnant_count": decision.stagnant_count,
                 "scope_key": decision.key,
                 "last_output": last_output,
+            },
+        )
+
+    def _block_for_failure_memory(
+        self,
+        project_id: str,
+        state: ProjectState,
+        agent_name: str,
+        decision: RetryDecision,
+    ) -> AgentOutput:
+        state.active_agent = None
+        state.status = "paused_strategy_required"
+        state.progress["p1_stop"] = {
+            "agent": agent_name,
+            "reason": decision.reason,
+            "category": decision.category,
+            "signature": decision.signature,
+            "occurrence": decision.occurrence,
+            "scope_key": decision.scope_key,
+            "strategy_change_required": decision.strategy_change_required,
+            "previous_strategy_id": decision.previous_strategy_id,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        state.notes = (
+            f"P1 blocked {agent_name}: {decision.reason}; "
+            f"failure={decision.category}; occurrences={decision.occurrence}"
+        )
+        self.save_state(project_id, state)
+        return AgentOutput(
+            agent_name=agent_name,
+            success=False,
+            content=(
+                "Execution blocked by P1 failure memory: "
+                f"{decision.reason}. Change _strategy_id before retrying."
+            ),
+            needs_review=True,
+            metadata={
+                "blocked_by": "p1_failure_memory",
+                "reason": decision.reason,
+                "failure_category": decision.category,
+                "failure_signature": decision.signature,
+                "occurrence": decision.occurrence,
+                "strategy_change_required": decision.strategy_change_required,
+                "previous_strategy_id": decision.previous_strategy_id,
+                "scope_key": decision.scope_key,
             },
         )
 
@@ -218,12 +273,13 @@ class Orchestrator:
 
         prior_progress = progress_guard.check(agent_name, progress_context)
         if prior_progress.should_stop:
-            return self._block_for_stagnation(
-                project_id,
-                state,
-                agent_name,
-                prior_progress,
-            )
+            return self._block_for_stagnation(project_id, state, agent_name, prior_progress)
+
+        failure_context = self._failure_context(project_id, state, context)
+        failure_memory = FailureMemory(checkpoint_dir / "failure_memory.json")
+        retry_decision = failure_memory.check_retry(agent_name, failure_context)
+        if not retry_decision.allowed:
+            return self._block_for_failure_memory(project_id, state, agent_name, retry_decision)
 
         guard_context = self._execution_guard_context(project_id, state, context)
         gate = ExecutionGate(checkpoint_dir / "request_cache.json")
@@ -243,10 +299,7 @@ class Orchestrator:
                 success=False,
                 content=f"Execution blocked by P0 safety gate: {gate_reason}",
                 needs_review=True,
-                metadata={
-                    "blocked_by": "p0_execution_gate",
-                    "reason": gate_reason,
-                },
+                metadata={"blocked_by": "p0_execution_gate", "reason": gate_reason},
             )
 
         state.active_agent = agent_name
@@ -273,11 +326,29 @@ class Orchestrator:
                 files,
                 result="success" if raw_output.success else "failed",
             )
-            progress_decision = progress_guard.record_result(
+            progress_decision = progress_guard.record_result(agent_name, progress_context, raw_output)
+
+        if raw_output.success:
+            failure_memory.resolve(agent_name, failure_context)
+            raw_output.metadata["p1_failure_state"] = "resolved"
+        else:
+            classification, active_failure = failure_memory.record_failure(
                 agent_name,
-                progress_context,
-                raw_output,
+                failure_context,
+                result.error or raw_output.content,
+                limit_hit=result.limit_hit,
+                metadata=result.metadata,
             )
+            raw_output.metadata["failure"] = {
+                "category": classification.category,
+                "signature": classification.signature,
+                "retryable": classification.retryable,
+                "transient": classification.transient,
+                "strategy_change_on_repeat": classification.strategy_change_on_repeat,
+                "same_strategy_count": active_failure["same_strategy_count"],
+                "consecutive_count": active_failure["consecutive_count"],
+                "strategy_id": active_failure["strategy_id"],
+            }
 
         saved_path = self._save_agent_output(project_id, agent_name, raw_output)
         saved_relative = str(saved_path.relative_to(self.projects_dir / project_id))
@@ -308,10 +379,13 @@ class Orchestrator:
         elif raw_output.success:
             state.status = "in_progress"
             state.notes = f"Last successful agent: {agent_name}"
+            state.progress.pop("p1_stop", None)
+            state.progress.pop("last_failure", None)
             if progress_decision and progress_decision.measurable_progress:
                 state.progress.pop("p0_stop", None)
         else:
             state.status = "paused"
+            state.progress["last_failure"] = raw_output.metadata.get("failure", {})
             state.notes = f"Agent failed: {agent_name}: {raw_output.content[:300]}"
         state.active_agent = None
         self.save_state(project_id, state)
