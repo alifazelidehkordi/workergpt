@@ -187,6 +187,23 @@ def test_hard_deadline_discards_an_incomplete_response(tmp_path, monkeypatch):
         session.wait_for_response(0, 2)
 
 
+def test_generation_activity_before_first_message_prevents_early_timeout(tmp_path, monkeypatch):
+    clock = _Clock()
+    session = runtime.PatchrightChatGPTSession(_options(tmp_path, timeout_seconds=100))
+    session._page = _Page(_Message(lambda: "finished"), assistant_count=1)
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(runtime.time, "sleep", clock.sleep)
+    monkeypatch.setattr(session, "_assistant_count", lambda: 0 if clock.now < 65 else 1)
+    monkeypatch.setattr(
+        runtime,
+        "_visible",
+        lambda page, selectors: object() if clock.now < 65 else None,
+    )
+
+    assert session.wait_for_response(0, 100) == "finished"
+
+
 def test_assistant_generation_error_is_raised_instead_of_returned(tmp_path, monkeypatch):
     clock = _Clock()
     error_text = "Something went wrong while generating the response. Retry"

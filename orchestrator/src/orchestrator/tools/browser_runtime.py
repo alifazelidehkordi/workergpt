@@ -515,6 +515,7 @@ class PatchrightChatGPTSession:
         hard_deadline = started + timeout_seconds
         activity_deadline = min(hard_deadline, started + min(60, max(20, timeout_seconds // 2)))
         seen_response = False
+        seen_generation_activity = False
         stable_since: float | None = None
         last_text = ""
         state_machine = ResponseStateMachine(
@@ -523,6 +524,13 @@ class PatchrightChatGPTSession:
         )
         self._state = "generating"
         while time.monotonic() < hard_deadline:
+            page_generating = _visible(self.page, STOP_BUTTON_SELECTORS) is not None
+            if page_generating:
+                # Long web-search/reasoning phases can keep the stop control
+                # visible before the first assistant message node is mounted.
+                # Treat that observable provider activity as progress.
+                seen_generation_activity = True
+                activity_deadline = min(hard_deadline, time.monotonic() + 30)
             for selector in ("[role='alert']", "[role='dialog']", "[data-testid*='toast']"):
                 try:
                     notices = self.page.locator(selector)
@@ -550,7 +558,7 @@ class PatchrightChatGPTSession:
                     current = ""
                 if _contains_provider_error(current, self._last_prompt):
                     raise ProviderResponseError(current)
-                generating = _visible(self.page, STOP_BUTTON_SELECTORS) is not None
+                generating = page_generating
                 observed_state = state_machine.observe(
                     ResponseObservation(
                         assistant_count=count,
@@ -577,7 +585,11 @@ class PatchrightChatGPTSession:
                                 return "__ORCHESTRATOR_RATE_LIMIT__\n" + current
                             self._state = "ready"
                             return current
-            if time.monotonic() >= activity_deadline and not seen_response:
+            if (
+                time.monotonic() >= activity_deadline
+                and not seen_response
+                and not seen_generation_activity
+            ):
                 raise TimeoutError("ChatGPT did not start responding before the activity timeout")
             time.sleep(0.5)
         if seen_response:
