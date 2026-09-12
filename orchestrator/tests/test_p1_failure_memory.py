@@ -107,7 +107,7 @@ def test_success_resolves_active_failure(tmp_path):
     assert decision.reason == "no_active_failure"
 
 
-def test_orchestrator_blocks_third_same_strategy_failure_before_executor(tmp_path):
+def test_orchestrator_allows_one_exact_failure_retry_then_requires_strategy_change(tmp_path):
     orchestrator = Orchestrator(tmp_path, use_mock_executor=True)
     orchestrator.create_project("p1-gate", "P1 Failure Gate")
 
@@ -124,25 +124,27 @@ def test_orchestrator_blocks_third_same_strategy_failure_before_executor(tmp_pat
 
     orchestrator.executor.execute = invalid_schema
 
-    base = {"research_question": "same bounded question"}
-    first = orchestrator.run_agent("p1-gate", "researcher", {**base, "attempt": 1})
-    second = orchestrator.run_agent("p1-gate", "researcher", {**base, "attempt": 2})
-    third = orchestrator.run_agent("p1-gate", "researcher", {**base, "attempt": 3})
+    context = {"research_question": "same bounded question"}
+    first = orchestrator.run_agent("p1-gate", "researcher", context)
+    second = orchestrator.run_agent("p1-gate", "researcher", context)
+    third = orchestrator.run_agent("p1-gate", "researcher", context)
 
     assert first.success is False
     assert second.success is False
     assert first.metadata["failure"]["category"] == "validation"
+    assert first.metadata["retry_policy"]["action"] == "retry"
     assert second.metadata["failure"]["same_strategy_count"] == 2
+    assert second.metadata["retry_policy"]["action"] == "change_strategy"
     assert third.success is False
-    assert third.metadata["blocked_by"] == "p1_failure_memory"
+    assert third.metadata["blocked_by"] == "p1_retry_policy"
     assert third.metadata["reason"] == "strategy_change_required"
-    assert third.metadata["strategy_change_required"] is True
+    assert third.metadata["retry_policy"]["action"] == "change_strategy"
     assert calls == 2
 
     changed_strategy = orchestrator.run_agent(
         "p1-gate",
         "researcher",
-        {**base, "attempt": 4, "_strategy_id": "schema-repair-v2"},
+        {**context, "_strategy_id": "schema-repair-v2"},
     )
     assert "blocked_by" not in changed_strategy.metadata
     assert changed_strategy.metadata["failure"]["strategy_id"] == "schema-repair-v2"
@@ -170,5 +172,7 @@ def test_rate_limit_resume_remains_allowed_with_failure_memory(tmp_path):
 
     assert first.success is False
     assert first.metadata["failure"]["category"] == "rate_limit"
+    assert first.metadata["retry_policy"]["action"] == "backoff"
+    assert first.metadata["retry_policy"]["delay_seconds"] == 60
     assert second.success is True
     assert calls == 2
