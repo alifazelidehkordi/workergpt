@@ -719,6 +719,20 @@ class ResearchWorkflow:
             draft_path = artifact_dir / "draft.md"
             approved_path = artifact_dir / "approved.md"
 
+            # A previous process may have been stopped after archiving the
+            # section but before producing its replacement.  When a critic
+            # repair plan already exists, recover the last valid draft so the
+            # next action is a targeted patch, not another full rewrite.
+            if (
+                not draft_path.exists()
+                and section.get("repair_plan")
+                and section.get("status") in {"researching", "needs_review", "pending"}
+                and self._recover_archived_draft(topic_id, spec, section, draft_path)
+            ):
+                topic["status"] = "in_progress"
+                state["status"] = "running"
+                self.save(state)
+
             if section.get("status") == "needs_review" and not approved_path.exists():
                 attempt = int(section.get("section_revision_attempts", 0)) + 1
                 if attempt > max_section_revisions:
