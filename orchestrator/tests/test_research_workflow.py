@@ -311,6 +311,56 @@ def test_workflow_status_cli_outputs_json(workflow_env, monkeypatch, capsys):
     assert output["summary"] == {"total": 1, "complete": 0, "in_progress": 0, "paused": 0, "pending": 1, "needs_review": 0}
 
 
+def test_parallel_workers_claim_different_topics_and_merge_state(tmp_path):
+    project = tmp_path / "projects" / "demo"
+    project.mkdir(parents=True)
+    (project / "state.json").write_text("{}", encoding="utf-8")
+    topics = tmp_path / "vault" / "موضوعات"
+    topics.mkdir(parents=True)
+    (topics / "one.md").write_text(_topic("KSR-1", "یک"), encoding="utf-8")
+    (topics / "two.md").write_text(_topic("KSR-2", "دو"), encoding="utf-8")
+    fake = FakeOrchestrator(tmp_path)
+    first = ResearchWorkflow(fake, "demo", worker_id="worker-1")
+    first.initialize(tmp_path / "vault", expected_topics=None)
+    second = ResearchWorkflow(fake, "demo", worker_id="worker-2")
+
+    assert first.claim_next_topic() == "KSR-1"
+    assert second.claim_next_topic() == "KSR-2"
+    claims = first.load()["claims"]
+    assert set(claims) == {"KSR-1", "KSR-2"}
+    assert claims["KSR-1"]["worker_id"] == "worker-1"
+    assert claims["KSR-2"]["worker_id"] == "worker-2"
+
+    first_state = first.load()
+    first_state["topics"]["KSR-1"]["status"] = "in_progress"
+    first.save(first_state)
+    second_state = second.load()
+    second_state["topics"]["KSR-2"]["status"] = "paused"
+    second.save(second_state)
+
+    merged = first.load()
+    assert merged["topics"]["KSR-1"]["status"] == "in_progress"
+    assert merged["topics"]["KSR-2"]["status"] == "paused"
+    first._release_topic("KSR-1")
+    second._release_topic("KSR-2")
+    assert first.load()["claims"] == {}
+
+
+def test_parallel_worker_cannot_claim_same_topic(workflow_env):
+    workflow, fake, _ = workflow_env
+    other = ResearchWorkflow(fake, "demo", worker_id="worker-2")
+    assert workflow.claim_next_topic() == "KSR-1"
+    try:
+        assert other.run_topic("KSR-1") == {
+            "topic": "KSR-1",
+            "status": "claimed",
+            "error": "Topic is already claimed by another worker",
+        }
+        assert fake.calls == []
+    finally:
+        workflow._release_topic("KSR-1")
+
+
 def test_section_prompts_are_scoped_and_enable_web_search_metadata():
     plan = {"questions": ["پرسش دقیق"], "search_queries": ["عبارت جست‌وجو"], "exclude": ["موضوع نامرتبط"]}
     common = {

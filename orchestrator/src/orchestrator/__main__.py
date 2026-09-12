@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--profile-dir", type=Path, default=None, help="Override persistent browser profile directory")
     parser.add_argument("--download-dir", type=Path, default=None, help="Browser download directory")
     parser.add_argument("--headless", action="store_true", help="Run the real browser headlessly")
+    parser.add_argument("--worker-id", default=None, help="Stable label for a parallel workflow worker")
     sub = parser.add_subparsers(dest="command")
 
     login = sub.add_parser("login", help="Open a persistent browser and log in to ChatGPT")
@@ -156,7 +157,7 @@ def main() -> None:
             print(f"Updated: {state.last_updated}")
             print(f"Notes: {state.notes}")
         elif args.command == "workflow":
-            research_workflow = ResearchWorkflow(orch, args.project_id)
+            research_workflow = ResearchWorkflow(orch, args.project_id, worker_id=args.worker_id)
             if args.workflow_command == "init":
                 expected = None if args.expected_topics == 0 else args.expected_topics
                 state = research_workflow.initialize(args.vault, args.report, expected_topics=expected)
@@ -165,7 +166,7 @@ def main() -> None:
                 state = research_workflow.load()
                 print(json.dumps({"status": state["status"], "active": state.get("active"), "summary": research_workflow.summary()}, ensure_ascii=False, indent=2))
             elif args.workflow_command == "run":
-                topic = args.topic or research_workflow.next_topic()
+                topic = args.topic or research_workflow.claim_next_topic()
                 if topic is None:
                     print(json.dumps({"status": "complete", "message": "All topics are complete"}, ensure_ascii=False, indent=2))
                 else:

@@ -54,6 +54,18 @@ python -m orchestrator --real --profile kintsugi workflow run kintsugi --topic K
 python -m orchestrator --real --profile kintsugi workflow run kintsugi
 ```
 
+Two workers may run the same workflow concurrently when each uses a different
+browser profile. With no `--topic`, each command atomically claims a different
+unfinished topic; a claim is released when that command exits.
+
+```bash
+python -m orchestrator --real --profile kintsugi-a --worker-id worker-a workflow run kintsugi
+python -m orchestrator --real --profile kintsugi-b --worker-id worker-b workflow run kintsugi
+```
+
+Authenticate both profiles beforehand with `login`. Reusing one profile is
+intentionally rejected by the browser-profile lock.
+
 Useful bounds:
 
 - `--max-sections 1` stops after one newly approved section.

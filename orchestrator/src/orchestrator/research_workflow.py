@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import fcntl
+import os
 import re
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from orchestrator.core.orchestrator import Orchestrator
 
@@ -227,12 +230,16 @@ def _validate_section_content(spec: SectionSpec, content: str) -> list[str]:
 class ResearchWorkflow:
     """Coordinate bounded web research, independent criticism, and safe commits."""
 
-    def __init__(self, orchestrator: Orchestrator, project_id: str) -> None:
+    def __init__(self, orchestrator: Orchestrator, project_id: str, worker_id: str | None = None) -> None:
         self.orchestrator = orchestrator
         self.project_id = project_id
         self.project_dir = orchestrator.projects_dir / project_id
         self.state_path = self.project_dir / "research_workflow.json"
+        self.state_lock_path = self.project_dir / ".research_workflow.lock"
         self.artifacts_dir = self.project_dir / "research_artifacts"
+        self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
+        self._topic_locks: dict[str, TextIO] = {}
+        self._claimed_topic: str | None = None
 
     def initialize(
         self,
@@ -271,7 +278,7 @@ class ResearchWorkflow:
             raise ValueError(f"Expected {expected_topics} unique research topics, found {len(topics)}")
 
         state = {
-            "version": 2,
+            "version": 3,
             "project_id": self.project_id,
             "vault_dir": str(vault),
             "report_file": str(Path(report_file).expanduser().resolve()) if report_file else None,
@@ -281,6 +288,7 @@ class ResearchWorkflow:
             "status": "ready",
             "topics": dict(sorted(topics.items(), key=lambda item: _topic_sort_key(item[0]))),
             "history": [],
+            "claims": {},
         }
         self.save(state)
         return state
@@ -288,11 +296,88 @@ class ResearchWorkflow:
     def load(self) -> dict[str, Any]:
         if not self.state_path.exists():
             raise FileNotFoundError("Research workflow is not initialized")
-        return dict(json.loads(self.state_path.read_text(encoding="utf-8")))
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        with self.state_lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            return dict(json.loads(self.state_path.read_text(encoding="utf-8")))
 
     def save(self, state: dict[str, Any]) -> None:
         state["updated_at"] = datetime.now(UTC).isoformat()
-        _atomic_write(self.state_path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        with self.state_lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            value = state
+            if self._claimed_topic and self.state_path.exists():
+                current = dict(json.loads(self.state_path.read_text(encoding="utf-8")))
+                topic_id = self._claimed_topic
+                current["topics"][topic_id] = state["topics"][topic_id]
+                seen = {json.dumps(item, ensure_ascii=False, sort_keys=True) for item in current.get("history", [])}
+                for item in state.get("history", []):
+                    marker = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    if marker not in seen:
+                        current.setdefault("history", []).append(item)
+                        seen.add(marker)
+                for key in ("status", "active", "report_file"):
+                    if key in state:
+                        current[key] = state[key]
+                current["updated_at"] = state["updated_at"]
+                value = current
+            _atomic_write(self.state_path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+    def _update_claim_record(self, topic_id: str, claimed: bool) -> None:
+        """Update diagnostic claim metadata while holding the durable state lock."""
+        with self.state_lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            state = dict(json.loads(self.state_path.read_text(encoding="utf-8")))
+            claims = state.setdefault("claims", {})
+            if claimed:
+                claims[topic_id] = {
+                    "worker_id": self.worker_id,
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "claimed_at": datetime.now(UTC).isoformat(),
+                }
+            elif claims.get(topic_id, {}).get("worker_id") == self.worker_id:
+                claims.pop(topic_id, None)
+            state["updated_at"] = datetime.now(UTC).isoformat()
+            _atomic_write(self.state_path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+    def _try_claim_topic(self, topic_id: str) -> bool:
+        if topic_id in self._topic_locks:
+            return True
+        if self._claimed_topic is not None:
+            raise RuntimeError(f"Worker already owns topic {self._claimed_topic}")
+        claim_dir = self.project_dir / ".research_claims"
+        claim_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = (claim_dir / f"{topic_id}.lock").open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_file.close()
+            return False
+        self._topic_locks[topic_id] = lock_file
+        self._claimed_topic = topic_id
+        self._update_claim_record(topic_id, True)
+        return True
+
+    def _release_topic(self, topic_id: str) -> None:
+        lock_file = self._topic_locks.pop(topic_id, None)
+        if lock_file is None:
+            return
+        try:
+            self._update_claim_record(topic_id, False)
+        finally:
+            self._claimed_topic = None
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
+
+    def claim_next_topic(self) -> str | None:
+        """Atomically reserve the first unfinished topic not owned by another worker."""
+        state = self.load()
+        for topic_id, topic in state["topics"].items():
+            if topic.get("status") != "complete" and self._try_claim_topic(topic_id):
+                return topic_id
+        return None
 
     def summary(self) -> dict[str, int]:
         topics = self.load()["topics"].values()
@@ -426,6 +511,22 @@ class ResearchWorkflow:
         self.save(state)
 
     def run_topic(
+        self,
+        topic_value: str,
+        max_sections: int | None = None,
+        max_revisions: int = 1,
+        max_section_revisions: int = 1,
+    ) -> dict[str, Any]:
+        topic_id = self.normalize_topic_id(topic_value)
+        acquired_here = topic_id not in self._topic_locks
+        if acquired_here and not self._try_claim_topic(topic_id):
+            return {"topic": topic_id, "status": "claimed", "error": "Topic is already claimed by another worker"}
+        try:
+            return self._run_topic_claimed(topic_id, max_sections, max_revisions, max_section_revisions)
+        finally:
+            self._release_topic(topic_id)
+
+    def _run_topic_claimed(
         self,
         topic_value: str,
         max_sections: int | None = None,
@@ -573,7 +674,7 @@ class ResearchWorkflow:
                     if attempt <= max_section_revisions:
                         _atomic_write(draft_path, cleaned_draft)
                         self._archive_section_attempt(state, topic_id, spec.id, local_section_issues, "local_precritic_validation")
-                        return self.run_topic(
+                        return self._run_topic_claimed(
                             topic_id,
                             max_sections=max_sections,
                             max_revisions=max_revisions,
@@ -630,7 +731,7 @@ class ResearchWorkflow:
                     attempt = int(section.get("section_revision_attempts", 0)) + 1
                     if attempt <= max_section_revisions:
                         self._archive_section_attempt(state, topic_id, spec.id, material_issues, "critic_revise")
-                        return self.run_topic(
+                        return self._run_topic_claimed(
                             topic_id,
                             max_sections=max_sections,
                             max_revisions=max_revisions,
@@ -700,7 +801,7 @@ class ResearchWorkflow:
             attempt = int(topic.get("revision_attempts", 0)) + 1
             if audit["verdict"] == "revise" and repairs and attempt <= max_revisions:
                 self._invalidate_sections(state, topic_id, repairs, audit, attempt)
-                return self.run_topic(
+                return self._run_topic_claimed(
                     topic_id,
                     max_sections=max_sections,
                     max_revisions=max_revisions,
