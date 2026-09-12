@@ -165,7 +165,7 @@ def _parse_section_review(text: str) -> dict[str, Any]:
     issues = review.get("issues")
     if not isinstance(issues, list):
         raise ValueError("issues must be a list")
-    issue_fields = {"id", "severity", "location", "problem", "required_change"}
+    issue_fields = {"id", "severity", "location", "excerpt", "problem", "required_change"}
     for issue in issues:
         _validate_issue(issue, issue_fields, "section issue")
     checks = review.get("source_checks")
@@ -955,13 +955,42 @@ class ResearchWorkflow:
                 _atomic_write(artifact_dir / "critic_response.txt", output.content)
                 try:
                     review = _parse_section_review(output.content)
+                    reviewed_draft = draft_path.read_text(encoding="utf-8")
+                    for issue in review["issues"]:
+                        if reviewed_draft.count(issue["excerpt"]) != 1:
+                            raise ValueError(
+                                f"Critic issue {issue['id']} excerpt must occur exactly once in the draft"
+                            )
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     self._record_failure(state, topic_id, f"{spec.id}:critic_parse", str(exc))
                     return {"topic": topic_id, "status": "paused", "error": str(exc)}
                 _atomic_write(review_path, json.dumps(review, ensure_ascii=False, indent=2) + "\n")
                 section["critic_review"] = str(review_path.relative_to(self.project_dir))
-                if review["verdict"] != "pass":
-                    material_issues = [item for item in review["issues"] if item["severity"] in {"blocking", "major"}]
+                blocking_issues = [
+                    item for item in review["issues"] if item["severity"] == "blocking"
+                ]
+                accept_with_warnings = (
+                    review["verdict"] == "revise"
+                    and not blocking_issues
+                    and int(section.get("targeted_repair_rounds", 0)) >= 1
+                )
+                if accept_with_warnings:
+                    section["accepted_with_warnings"] = review["issues"]
+                    state["history"].append(
+                        {
+                            "at": datetime.now(UTC).isoformat(),
+                            "topic": topic_id,
+                            "section": spec.id,
+                            "stage": "accepted_with_warnings",
+                            "issues": [item["id"] for item in review["issues"]],
+                        }
+                    )
+                if review["verdict"] != "pass" and not accept_with_warnings:
+                    material_issues = [
+                        item
+                        for item in review["issues"]
+                        if item["severity"] in {"blocking", "major"}
+                    ]
                     section["status"] = "needs_review"
                     section["unresolved"] = material_issues
                     repair_plan = self._build_repair_plan(
@@ -1051,6 +1080,9 @@ class ResearchWorkflow:
                         section["draft"] = str(draft_path.relative_to(self.project_dir))
                         section["draft_hash"] = _sha256(repaired_draft)
                         section["status"] = "researched"
+                        section["targeted_repair_rounds"] = (
+                            int(section.get("targeted_repair_rounds", 0)) + 1
+                        )
                         self.save(state)
                         return self._run_topic_claimed(
                             topic_id,
@@ -1117,7 +1149,26 @@ class ResearchWorkflow:
         topic["audit_attempts"] = audit_round
 
         local_issues = self.validate_candidate(candidate)
-        if audit.get("verdict") != "pass" or local_issues:
+        final_blocking = [
+            item for item in audit.get("issues", []) if item.get("severity") == "blocking"
+        ]
+        final_accept_with_warnings = (
+            audit.get("verdict") == "revise"
+            and not final_blocking
+            and not local_issues
+            and int(topic.get("revision_attempts", 0)) >= 1
+        )
+        if final_accept_with_warnings:
+            topic["accepted_with_warnings"] = audit["issues"]
+            state["history"].append(
+                {
+                    "at": datetime.now(UTC).isoformat(),
+                    "topic": topic_id,
+                    "stage": "final_accepted_with_warnings",
+                    "issues": [item["id"] for item in audit["issues"]],
+                }
+            )
+        if (audit.get("verdict") != "pass" and not final_accept_with_warnings) or local_issues:
             repairs = self._repair_section_ids(audit)
             attempt = int(topic.get("revision_attempts", 0)) + 1
             if audit["verdict"] == "revise" and repairs and attempt <= max_revisions:

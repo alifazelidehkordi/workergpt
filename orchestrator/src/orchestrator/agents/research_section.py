@@ -115,10 +115,10 @@ class ResearchSectionCriticAgent(BaseAgent):
 دقیقاً یک بلوک JSON fenced و هیچ متن دیگری با این ساختار برگردان:
 {{
   "verdict": "pass" or "revise",
-  "issues": [{{"id":"stable id","severity":"blocking|major|minor","location":"specific location","problem":"what is wrong","required_change":"what the researcher must change"}}],
+  "issues": [{{"id":"stable id","severity":"blocking|major|minor","location":"specific location","excerpt":"exact quote copied from the draft","problem":"what is wrong","required_change":"what the researcher must change"}}],
   "source_checks": [{{"claim":"checked claim","url":"https URL","result":"verified|mismatch|unverifiable","note":"short note"}}]
 }}
-فقط وقتی issue مسدودکننده یا major وجود ندارد `pass` بده. Markdown اصلاح‌شده تولید نکن."""
+`blocking` را فقط برای جعل/عدم قابلیت ردیابی منبعِ ادعای محوری، خطر ایمنی، متن ناقص یا پاسخ به بخش اشتباه استفاده کن. `major` پیشنهاد اصلاح مهم ولی غیرمسدودکننده است. excerpt باید عیناً از Draft کپی شود؛ ایراد بدون نشانی دقیق نساز. فقط وقتی issue مسدودکننده یا major وجود ندارد `pass` بده. Markdown اصلاح‌شده تولید نکن."""
 
 
 class ResearchSectionRepairAgent(BaseAgent):

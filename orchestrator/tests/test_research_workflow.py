@@ -71,6 +71,7 @@ def _section_review(section_id: str, verdict: str = "pass") -> str:
             "id": "source-1",
             "severity": "major",
             "location": "منابع",
+            "excerpt": f"[1] https://doi.org/10.1000/{section_id}",
             "problem": "منبع تأیید نشده",
             "required_change": "منبع معتبر جایگزین شود",
         }],
@@ -250,6 +251,20 @@ def test_section_revise_runs_fresh_research_and_critic(workflow_env):
         (workflow.artifacts_dir / "KSR-1" / "01_construct" / "repair_plan.json").read_text(encoding="utf-8")
     )
     assert repair_plan["actions"][0]["occurrence"] == 1
+
+
+def test_nonblocking_major_is_accepted_after_one_targeted_repair(workflow_env):
+    workflow, fake, _ = workflow_env
+    fake.section_verdicts = ["revise", "revise"]
+
+    result = workflow.run_topic("KSR-1", max_section_revisions=2)
+
+    assert result["status"] == "complete"
+    section = workflow.load()["topics"]["KSR-1"]["sections"]["01_construct"]
+    assert section["status"] == "complete"
+    assert section["targeted_repair_rounds"] == 1
+    assert section["accepted_with_warnings"][0]["severity"] == "major"
+    assert [name for name, _ in fake.calls].count("research_section_repair") == 1
 
 
 def test_repeated_critic_issue_gets_escalated_repair_strategy(workflow_env):
