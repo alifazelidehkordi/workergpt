@@ -15,7 +15,13 @@ def _bullets(values: Any) -> str:
         if isinstance(value, dict):
             problem = value.get("problem", "")
             change = value.get("required_change", "")
-            rendered.append(f"- مشکل: {problem} | تغییر لازم: {change}")
+            strategy = value.get("repair_strategy", "")
+            occurrence = value.get("occurrence")
+            repeat_note = f" | بار تکرار: {occurrence}" if occurrence else ""
+            strategy_note = f" | راهبرد: {strategy}" if strategy else ""
+            rendered.append(
+                f"- مشکل: {problem} | تغییر لازم: {change}{repeat_note}{strategy_note}"
+            )
         else:
             rendered.append(f"- {value}")
     return "\n".join(rendered)
@@ -66,6 +72,9 @@ class ResearchSectionAgent(BaseAgent):
 
 بازخورد تلاش قبلی:
 {_bullets(context.get('review_feedback'))}
+
+برنامهٔ اصلاح ثبت‌شده:
+{context.get('repair_plan') or 'برای این تلاش برنامهٔ تکرارشونده‌ای ثبت نشده است.'}
 
 سیاست پژوهش:
 {context.get('research_policy', '')}

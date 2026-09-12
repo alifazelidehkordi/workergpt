@@ -26,6 +26,8 @@ TOPIC_PLANNER_TIMEOUT_SECONDS = 900
 SECTION_RESEARCHER_TIMEOUT_SECONDS = 1800
 SECTION_CRITIC_TIMEOUT_SECONDS = 900
 FINAL_CRITIC_TIMEOUT_SECONDS = 900
+REAL_MIN_SECTION_REVISIONS = 8
+REAL_MIN_FINAL_REVISIONS = 4
 
 
 @dataclass(frozen=True)
@@ -482,6 +484,58 @@ class ResearchWorkflow:
         )
         self.save(state)
 
+    def _build_repair_plan(
+        self,
+        topic_id: str,
+        section_id: str,
+        section: dict[str, Any],
+        issues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Turn critic JSON into durable actions and escalate repeated issues."""
+        prior_ids: list[str] = []
+        for revision in section.get("revision_history", []):
+            for item in revision.get("feedback", []):
+                if isinstance(item, dict) and item.get("id"):
+                    prior_ids.append(str(item["id"]))
+        actions = []
+        for issue in issues:
+            issue_id = str(issue.get("id", "unknown"))
+            occurrence = 1 + prior_ids.count(issue_id)
+            repeated = occurrence > 1
+            actions.append(
+                {
+                    "issue_id": issue_id,
+                    "occurrence": occurrence,
+                    "repeated": repeated,
+                    "severity": issue.get("severity"),
+                    "location": issue.get("location"),
+                    "problem": issue.get("problem"),
+                    "required_change": issue.get("required_change"),
+                    "repair_strategy": (
+                        "ایراد تکراری است: متن قبلی را صرفاً بازعبارت‌بندی نکن؛ ادعای مسئله‌دار را "
+                        "با منبع مشخص اصلاح یا حذف کن و تغییر خواسته‌شده را صریحاً در محل تعیین‌شده اعمال کن."
+                        if repeated
+                        else "تغییر خواسته‌شده را مستقیماً اعمال و پشتوانهٔ منبع آن را بررسی کن."
+                    ),
+                }
+            )
+        plan = {
+            "topic_id": topic_id,
+            "section_id": section_id,
+            "created_at": datetime.now(UTC).isoformat(),
+            "attempt": int(section.get("section_revision_attempts", 0)) + 1,
+            "actions": actions,
+            "acceptance": [
+                "همهٔ ایرادهای blocking و major رفع شده باشند",
+                "هر ادعای افزوده‌شده منبع https قابل‌ردیابی داشته باشد",
+                "تیتر دقیق و محدودیت ۶۰۰ تا ۹۰۰ واژه حفظ شود",
+            ],
+        }
+        path = self._artifact_dir(topic_id, section_id) / "repair_plan.json"
+        _atomic_write(path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+        section["repair_plan"] = str(path.relative_to(self.project_dir))
+        return plan
+
     def _invalidate_sections(
         self,
         state: dict[str, Any],
@@ -523,6 +577,12 @@ class ResearchWorkflow:
         max_revisions: int = 1,
         max_section_revisions: int = 1,
     ) -> dict[str, Any]:
+        executor = getattr(self.orchestrator, "executor", None)
+        if executor is not None and not getattr(executor, "use_mock", True):
+            # Real web research needs enough room to complete the whole
+            # draft→critic→repair chain inside one persistent browser session.
+            max_section_revisions = max(max_section_revisions, REAL_MIN_SECTION_REVISIONS)
+            max_revisions = max(max_revisions, REAL_MIN_FINAL_REVISIONS)
         topic_id = self.normalize_topic_id(topic_value)
         acquired_here = topic_id not in self._topic_locks
         if acquired_here and not self._try_claim_topic(topic_id):
@@ -647,6 +707,11 @@ class ResearchWorkflow:
                 state["active"] = {"topic": topic_id, "section": spec.id, "stage": "research"}
                 section["status"] = "researching"
                 self.save(state)
+                repair_plan_content = None
+                if section.get("repair_plan"):
+                    repair_plan_path = self.project_dir / str(section["repair_plan"])
+                    if repair_plan_path.is_file():
+                        repair_plan_content = repair_plan_path.read_text(encoding="utf-8")
                 try:
                     output = self.orchestrator.run_agent(
                         self.project_id,
@@ -659,6 +724,7 @@ class ResearchWorkflow:
                             "section_instructions": spec.instructions,
                             "section_plan": plan[spec.id],
                             "review_feedback": section.get("review_feedback", []),
+                            "repair_plan": repair_plan_content,
                             "_timeout_seconds": SECTION_RESEARCHER_TIMEOUT_SECONDS,
                             "_web_search": True,
                         },
@@ -741,9 +807,19 @@ class ResearchWorkflow:
                     material_issues = [item for item in review["issues"] if item["severity"] in {"blocking", "major"}]
                     section["status"] = "needs_review"
                     section["unresolved"] = material_issues
+                    repair_plan = self._build_repair_plan(
+                        topic_id, spec.id, section, material_issues
+                    )
+                    section["review_feedback"] = repair_plan["actions"]
                     attempt = int(section.get("section_revision_attempts", 0)) + 1
                     if attempt <= max_section_revisions:
-                        self._archive_section_attempt(state, topic_id, spec.id, material_issues, "critic_revise")
+                        self._archive_section_attempt(
+                            state,
+                            topic_id,
+                            spec.id,
+                            repair_plan["actions"],
+                            "critic_revise",
+                        )
                         return self._run_topic_claimed(
                             topic_id,
                             max_sections=max_sections,

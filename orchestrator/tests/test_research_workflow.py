@@ -205,11 +205,16 @@ def test_section_revise_runs_fresh_research_and_critic(workflow_env):
     research_calls = [context for name, context in fake.calls if name == "research_section"]
     assert len(research_calls) == 7
     assert research_calls[1]["review_feedback"][0]["required_change"] == "منبع معتبر جایگزین شود"
+    assert '"actions"' in research_calls[1]["repair_plan"]
     revision_dir = workflow.artifacts_dir / "KSR-1" / "01_construct" / "revisions" / "section-attempt-1"
     assert (revision_dir / "draft.md").exists()
     assert (revision_dir / "critic_review.json").exists()
     history = workflow.load()["topics"]["KSR-1"]["sections"]["01_construct"]["revision_history"]
     assert history[0]["hashes"]["draft.md"]
+    repair_plan = json.loads(
+        (workflow.artifacts_dir / "KSR-1" / "01_construct" / "repair_plan.json").read_text(encoding="utf-8")
+    )
+    assert repair_plan["actions"][0]["occurrence"] == 1
 
 
 def test_precritic_ui_error_is_archived_and_researched_again(workflow_env, monkeypatch):
