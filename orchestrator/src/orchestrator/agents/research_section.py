@@ -167,7 +167,7 @@ Complete dossier:
 دقیقاً یک بلوک JSON fenced با این ساختار و هیچ متن دیگری برگردان:
 {{
   "verdict": "pass" or "revise",
-  "issues": [{{"section_ids":["01_construct"],"severity":"blocking|major|minor","problem":"what is wrong","required_change":"what must change"}}],
+  "issues": [{{"id":"stable issue id","section_ids":["01_construct"],"severity":"blocking|major|minor","location":"specific location","excerpt":"exact quote from the affected section","problem":"what is wrong","required_change":"what must change"}}],
   "summary": "short Persian summary"
 }}
 فقط وقتی issue مسدودکننده یا major باقی نمانده `pass` بده. فقط از شش شناسهٔ شناخته‌شده استفاده کن و پرونده را بازنویسی نکن."""

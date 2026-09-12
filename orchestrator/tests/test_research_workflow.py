@@ -17,11 +17,24 @@ from orchestrator.research_workflow import (
     _parse_final_audit,
     _parse_section_review,
     _sha256,
+    _targeted_repair_context,
 )
 
 
 def test_clean_model_block_removes_rendered_language_badge():
     assert _clean_model_block("Markdown\n## تیتر\n\nمتن") == "## تیتر\n\nمتن\n"
+
+
+def test_two_issues_can_target_the_same_exact_paragraph():
+    paragraph = "این پاراگراف دو ادعای مرتبط و نیازمند اصلاح دارد."
+    issues = [
+        {"id": "I1", "excerpt": paragraph, "location": "پاراگراف", "problem": "اول", "required_change": "اصلاح"},
+        {"id": "I2", "excerpt": paragraph, "location": "پاراگراف", "problem": "دوم", "required_change": "اصلاح"},
+    ]
+
+    context = _targeted_repair_context(f"## تیتر\n\n{paragraph}\n", issues)
+
+    assert [item["excerpt"] for item in context] == [paragraph, paragraph]
 
 
 def _topic(topic_id: str = "KSR-1", title: str = "آزمون") -> str:
@@ -71,8 +84,11 @@ def _audit(verdict: str = "pass", repairs: dict | None = None) -> str:
     if verdict == "revise":
         section_ids = list((repairs or {"04_evidence": []}).keys())
         issues = [{
+            "id": "final-1",
             "section_ids": section_ids,
             "severity": "major",
+            "location": "پاراگراف نخست",
+            "excerpt": f"[1] https://doi.org/10.1000/{section_ids[0]}",
             "problem": "بخش نیازمند اصلاح است",
             "required_change": next(iter((repairs or {"x": ["اصلاح"]}).values()))[0],
         }]
@@ -205,8 +221,10 @@ def test_final_revise_triggers_one_targeted_research_round(workflow_env):
 
     assert result["status"] == "complete"
     research_calls = [context for name, context in fake.calls if name == "research_section"]
-    assert len(research_calls) == 7
-    assert research_calls[-1]["review_feedback"][0]["required_change"] == "جدول را اصلاح کن"
+    repair_calls = [context for name, context in fake.calls if name == "research_section_repair"]
+    assert len(research_calls) == 6
+    assert len(repair_calls) == 1
+    assert "جدول را اصلاح کن" in repair_calls[0]["repair_plan"]
     assert (workflow.artifacts_dir / "KSR-1" / "final_audit_attempt-1.json").exists()
     assert (workflow.artifacts_dir / "KSR-1" / "final_audit_attempt-2.json").exists()
 
@@ -253,6 +271,25 @@ def test_repeated_critic_issue_gets_escalated_repair_strategy(workflow_env):
     assert plan["actions"][0]["occurrence"] == 2
     assert plan["actions"][0]["repeated"] is True
     assert "صرفاً بازعبارت‌بندی نکن" in plan["actions"][0]["repair_strategy"]
+
+
+def test_repair_plan_contains_only_issues_remaining_in_latest_review(workflow_env):
+    workflow, _, _ = workflow_env
+    section = {
+        "section_revision_attempts": 1,
+        "revision_history": [{"feedback": [{"issue_id": "fixed"}, {"issue_id": "remaining"}]}],
+    }
+    remaining = {
+        "id": "remaining",
+        "severity": "major",
+        "location": "منابع",
+        "problem": "هنوز منبع ناقص است",
+        "required_change": "منبع را تکمیل کن",
+    }
+
+    plan = workflow._build_repair_plan("KSR-1", "01_construct", section, [remaining])
+
+    assert [action["issue_id"] for action in plan["actions"]] == ["remaining"]
 
 
 def test_precritic_ui_error_is_archived_and_researched_again(workflow_env, monkeypatch):

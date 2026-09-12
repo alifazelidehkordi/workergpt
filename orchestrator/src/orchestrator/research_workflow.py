@@ -233,8 +233,11 @@ def _targeted_repair_context(draft: str, issues: list[dict[str, Any]]) -> list[d
         }
 
     selected: list[dict[str, str]] = []
-    used: set[str] = set()
     for issue in issues:
+        exact_excerpt = str(issue.get("excerpt", "")).strip()
+        if exact_excerpt and draft.count(exact_excerpt) == 1:
+            selected.append({"issue_id": str(issue["id"]), "excerpt": exact_excerpt})
+            continue
         query_text = (
             f"{issue.get('location', '')} {issue.get('problem', '')} "
             f"{issue.get('required_change', '')}"
@@ -252,9 +255,7 @@ def _targeted_repair_context(draft: str, issues: list[dict[str, Any]]) -> list[d
             key=paragraph_score,
             reverse=True,
         )
-        paragraph = next((item for item in ranked if item not in used), ranked[0])
-        used.add(paragraph)
-        selected.append({"issue_id": str(issue["id"]), "excerpt": paragraph})
+        selected.append({"issue_id": str(issue["id"]), "excerpt": ranked[0]})
     return selected
 
 
@@ -268,7 +269,15 @@ def _parse_final_audit(text: str) -> dict[str, Any]:
     if not isinstance(issues, list):
         raise ValueError("Final issues must be a list")
     known = {spec.id for spec in SECTIONS}
-    fields = {"section_ids", "severity", "problem", "required_change"}
+    fields = {
+        "id",
+        "section_ids",
+        "severity",
+        "location",
+        "excerpt",
+        "problem",
+        "required_change",
+    }
     for issue in issues:
         _validate_issue(issue, fields, "final issue")
         ids = issue["section_ids"]
@@ -629,8 +638,48 @@ class ResearchWorkflow:
         topic = state["topics"][topic_id]
         for section_id in section_ids:
             section = topic["sections"][section_id]
+            spec = next(item for item in SECTIONS if item.id == section_id)
             artifact_dir = self._artifact_dir(topic_id, section_id)
             revision_dir = artifact_dir / "revisions" / f"final-audit-attempt-{attempt}"
+            feedback = [issue for issue in audit["issues"] if section_id in issue["section_ids"]]
+            current_path = artifact_dir / "approved.md"
+            if not current_path.exists():
+                current_path = artifact_dir / "draft.md"
+            if not current_path.exists():
+                raise ValueError(f"No current section draft exists for targeted final repair: {section_id}")
+            current_draft = current_path.read_text(encoding="utf-8")
+            repair_plan = self._build_repair_plan(topic_id, section_id, section, feedback)
+            repair_context = _targeted_repair_context(current_draft, feedback)
+            state["active"] = {
+                "topic": topic_id,
+                "section": section_id,
+                "stage": "final_targeted_repair",
+            }
+            self.save(state)
+            repair_output = self.orchestrator.run_agent(
+                self.project_id,
+                "research_section_repair",
+                {
+                    "topic_title": topic["title"],
+                    "topic_id": topic_id,
+                    "section_title": spec.title,
+                    "repair_context": json.dumps(repair_context, ensure_ascii=False, indent=2),
+                    "repair_plan": json.dumps(repair_plan, ensure_ascii=False, indent=2),
+                    "_timeout_seconds": SECTION_RESEARCHER_TIMEOUT_SECONDS,
+                    "_web_search": True,
+                },
+            )
+            if not repair_output.success:
+                raise ValueError(repair_output.content)
+            patches = _parse_repair_patches(
+                repair_output.content,
+                {str(issue["id"]) for issue in feedback},
+            )
+            repaired_draft = _apply_targeted_patches(current_draft, patches)
+            local_issues = _validate_section_content(spec, repaired_draft)
+            if local_issues:
+                raise ValueError("; ".join(local_issues))
+
             hashes: dict[str, str] = {}
             for name in ("research_response.txt", "draft.md", "approved.md", "critic_review.json", "critic_response.txt"):
                 source = artifact_dir / name
@@ -638,11 +687,23 @@ class ResearchWorkflow:
                     content = source.read_text(encoding="utf-8")
                     _atomic_write(revision_dir / name, content)
                     hashes[name] = _sha256(content)
+            _atomic_write(revision_dir / "repair_response.txt", repair_output.content)
+            _atomic_write(artifact_dir / "draft.md", repaired_draft)
+            for name in ("approved.md", "critic_review.json", "critic_response.txt"):
+                source = artifact_dir / name
+                if source.exists():
                     source.unlink()
-            feedback = [issue for issue in audit["issues"] if section_id in issue["section_ids"]]
-            section.update({"status": "pending", "review_feedback": feedback, "revision_attempt": attempt})
+            section.update(
+                {
+                    "status": "researched",
+                    "draft": str((artifact_dir / "draft.md").relative_to(self.project_dir)),
+                    "draft_hash": _sha256(repaired_draft),
+                    "review_feedback": repair_plan["actions"],
+                    "revision_attempt": attempt,
+                }
+            )
             section.setdefault("revision_history", []).append(
-                {"attempt": attempt, "at": datetime.now(UTC).isoformat(), "label": "final_audit", "feedback": feedback, "hashes": hashes}
+                {"attempt": attempt, "at": datetime.now(UTC).isoformat(), "label": "final_targeted_repair", "feedback": repair_plan["actions"], "hashes": hashes}
             )
             section.pop("approved", None)
             section.pop("approved_hash", None)
@@ -1060,7 +1121,13 @@ class ResearchWorkflow:
             repairs = self._repair_section_ids(audit)
             attempt = int(topic.get("revision_attempts", 0)) + 1
             if audit["verdict"] == "revise" and repairs and attempt <= max_revisions:
-                self._invalidate_sections(state, topic_id, repairs, audit, attempt)
+                try:
+                    self._invalidate_sections(state, topic_id, repairs, audit, attempt)
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    self._record_failure(
+                        state, topic_id, "final_targeted_repair", str(exc)
+                    )
+                    return {"topic": topic_id, "status": "paused", "error": str(exc)}
                 return self._run_topic_claimed(
                     topic_id,
                     max_sections=max_sections,
