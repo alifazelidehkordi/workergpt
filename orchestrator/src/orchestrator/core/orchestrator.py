@@ -19,6 +19,7 @@ from orchestrator.agents import (
     ResearcherAgent,
     SynthesizerAgent,
 )
+from orchestrator.core.execution_gate import ExecutionGate
 from orchestrator.core.models import AgentOutput, ProjectState
 from orchestrator.tools.chatgpt_web import ChatGPTWebExecutor
 
@@ -118,6 +119,27 @@ class Orchestrator:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
+    def _execution_guard_context(
+        self,
+        project_id: str,
+        state: ProjectState,
+        context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return stable semantic input for duplicate detection.
+
+        Volatile values such as timestamps, active_agent, notes, and executor
+        metadata are deliberately excluded. Meaningful workflow progress is
+        included so the same agent/input can run again after state advances.
+        """
+        return {
+            "project_id": project_id,
+            "project_definition": self.get_definition(project_id),
+            "current_phase": state.current_phase,
+            "current_module": state.current_module,
+            "progress": state.progress,
+            "input": context or {},
+        }
+
     def run_agent(
         self,
         project_id: str,
@@ -127,7 +149,32 @@ class Orchestrator:
     ) -> AgentOutput:
         if agent_name not in self.agents:
             raise ValueError(f"Unknown agent: {agent_name}")
+
         state = self.load_state(project_id)
+        guard_context = self._execution_guard_context(project_id, state, context)
+        gate = ExecutionGate(self.projects_dir / project_id / "checkpoints" / "request_cache.json")
+        allowed, gate_reason = gate.allow(agent_name, guard_context, files)
+        if not allowed:
+            state.active_agent = None
+            state.status = "paused"
+            state.progress["p0_blocked"] = {
+                "agent": agent_name,
+                "reason": gate_reason,
+                "at": datetime.now(UTC).isoformat(),
+            }
+            state.notes = f"P0 blocked {agent_name}: {gate_reason}"
+            self.save_state(project_id, state)
+            return AgentOutput(
+                agent_name=agent_name,
+                success=False,
+                content=f"Execution blocked by P0 safety gate: {gate_reason}",
+                needs_review=True,
+                metadata={
+                    "blocked_by": "p0_execution_gate",
+                    "reason": gate_reason,
+                },
+            )
+
         state.active_agent = agent_name
         self.save_state(project_id, state)
         full_context = {
@@ -143,6 +190,18 @@ class Orchestrator:
         agent = self.agents[agent_name]
         result = self.executor.execute(agent.create_request(full_context, files=files))
         output = agent.process_result(result, full_context)
+
+        # Rate-limit interruptions are intentionally not cached so resume_last()
+        # may replay the same logical request. Other completed attempts are
+        # recorded before any future identical action can reach the executor.
+        if not result.limit_hit:
+            gate.record(
+                agent_name,
+                guard_context,
+                files,
+                result="success" if output.success else "failed",
+            )
+
         self._save_agent_output(project_id, agent_name, output)
 
         state = self.load_state(project_id)
