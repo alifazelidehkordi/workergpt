@@ -1,15 +1,16 @@
 """
 P0 safety layer for preventing duplicate agent executions.
 
-This module is intentionally isolated so the orchestrator can adopt it without
-changing existing workflow behavior immediately.
+The fingerprint is based on semantic agent input and file content identity so
+rewriting a file at the same path is treated as new work while resubmitting an
+unchanged file is blocked.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,11 +34,12 @@ class RequestGuard:
         payload = {
             "agent": agent,
             "context": context,
-            "files": files,
+            "files": self._normalize_files(files),
         }
         encoded = json.dumps(
             payload,
             sort_keys=True,
+            ensure_ascii=False,
             default=str,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
@@ -66,14 +68,34 @@ class RequestGuard:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self.cache_file.write_text(
-            json.dumps(cache, indent=2),
+            json.dumps(cache, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-    def _load(self) -> dict:
+    def _normalize_files(self, files: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in files or []:
+            path = Path(item)
+            entry: dict[str, Any] = {"path": str(path)}
+            if path.is_file():
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                entry["sha256"] = digest.hexdigest()
+                entry["size"] = path.stat().st_size
+            else:
+                entry["missing"] = True
+            normalized.append(entry)
+        return normalized
+
+    def _load(self) -> dict[str, Any]:
         if not self.cache_file.exists():
             return {}
         try:
-            return json.loads(self.cache_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            data = json.loads(self.cache_file.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            # Cache corruption must never crash the workflow. Treat it as empty
+            # and allow the request; higher layers can still log the incident.
             return {}
