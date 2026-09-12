@@ -1,0 +1,112 @@
+name: P1 Integration Migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p1-integration-migration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Patch P1 integration
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          orch_path = Path('orchestrator/src/orchestrator/core/orchestrator.py')
+          s = orch_path.read_text(encoding='utf-8')
+
+          import_line = 'from orchestrator.core.retry_policy import RetryAction, RetryPolicy, RetryPolicyDecision\n'
+          new_import = import_line + 'from orchestrator.core.retry_execution import RetryExecutionController\n'
+          if 'from orchestrator.core.retry_execution import RetryExecutionController' not in s:
+              if import_line not in s:
+                  raise SystemExit('orchestrator retry_policy import marker not found')
+              s = s.replace(import_line, new_import, 1)
+
+          if 'def run_agent_with_retries(' not in s:
+              marker = '    def run_agent(\n'
+              helper = '''    def run_agent_with_retries(\n        self,\n        project_id: str,\n        agent_name: str,\n        context: dict[str, Any] | None = None,\n        files: list[Path] | None = None,\n        *,\n        sleeper: Any | None = None,\n    ) -> AgentOutput:\n        """Execute explicit bounded retries under the persistent P1 budget."""\n        kwargs: dict[str, Any] = {}\n        if sleeper is not None:\n            kwargs["sleeper"] = sleeper\n        controller = RetryExecutionController(self, project_id, **kwargs)\n        return controller.execute(agent_name, context, files=files)\n\n'''
+              if marker not in s:
+                  raise SystemExit('run_agent marker not found')
+              s = s.replace(marker, helper + marker, 1)
+
+          # Durable resumes must also respect P1 retry/backoff state when it exists.
+          resume_old = '''        output = self.run_agent(\n            project_id,\n            str(payload["agent_name"]),\n            context=dict(payload.get("context") or {}),\n            files=[Path(item) for item in payload.get("files", [])],\n        )\n'''
+          resume_new = resume_old.replace('self.run_agent(', 'self.run_agent_with_retries(')
+          if resume_old in s:
+              s = s.replace(resume_old, resume_new, 1)
+
+          # The autonomous pipeline uses controlled execution; one-shot helper APIs stay one-shot.
+          s = s.replace(
+              '        research = self.research(project_id, question, goal)\n',
+              '''        research = self.run_agent_with_retries(\n            project_id,\n            "researcher",\n            {"research_question": question, "goal": goal or "Rigorous research"},\n        )\n''',
+              1,
+          )
+          s = s.replace(
+              '            critique = self.critique(project_id, research.content)\n',
+              '''            critique = self.run_agent_with_retries(\n                project_id,\n                "critic",\n                {"content_to_critique": research.content},\n            )\n''',
+              1,
+          )
+          synth_old = '''            synthesis = self.synthesize(\n                project_id,\n                research.content,\n                critique_text,\n            )\n'''
+          synth_new = '''            synthesis = self.run_agent_with_retries(\n                project_id,\n                "synthesizer",\n                {"research_report": research.content, "critique": critique_text},\n            )\n'''
+          if synth_old in s:
+              s = s.replace(synth_old, synth_new, 1)
+          s = s.replace(
+              '            checkpoint = self.create_checkpoint(project_id, recent)\n',
+              '''            checkpoint = self.run_agent_with_retries(\n                project_id,\n                "checkpoint",\n                {"recent_outputs": recent},\n            )\n            if checkpoint.success:\n                checkpoint_state = self.load_state(project_id)\n                checkpoint_state.last_checkpoint = datetime.now(UTC).isoformat()\n                self.save_state(project_id, checkpoint_state)\n''',
+              1,
+          )
+
+          # New projects expose the retry limit that was previously only a model default.
+          project_block = 'status = "active"\\n\'\'\','
+          if '[settings]\\nmax_retries = 3' not in s and project_block in s:
+              s = s.replace(
+                  project_block,
+                  'status = "active"\\n\\n[settings]\\nmax_retries = 3\\nauto_checkpoint = true\\n\'\'\',',
+                  1,
+              )
+
+          orch_path.write_text(s, encoding='utf-8')
+
+          workflow_path = Path('orchestrator/src/orchestrator/research_workflow.py')
+          w = workflow_path.read_text(encoding='utf-8')
+          if '    def _run_agent(' not in w:
+              marker = '    def initialize(\n'
+              helper = '''    def _run_agent(\n        self,\n        project_id: str,\n        agent_name: str,\n        context: dict[str, Any],\n    ):\n        """Route durable workflow calls through bounded P1 retries when available."""\n        controlled = getattr(self.orchestrator, "run_agent_with_retries", None)\n        if callable(controlled):\n            return controlled(project_id, agent_name, context)\n        return self.orchestrator.run_agent(project_id, agent_name, context)\n\n'''
+              if marker not in w:
+                  raise SystemExit('research workflow initialize marker not found')
+              w = w.replace(marker, helper + marker, 1)
+          w = w.replace('self.orchestrator.run_agent(', 'self._run_agent(')
+          workflow_path.write_text(w, encoding='utf-8')
+          PY
+      - name: Install package
+        working-directory: orchestrator
+        run: pip install -e .
+      - name: Run full regression suite
+        working-directory: orchestrator
+        run: pytest -q
+      - name: Compile package
+        working-directory: orchestrator
+        run: python -m compileall -q src
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add orchestrator/src/orchestrator/core/orchestrator.py orchestrator/src/orchestrator/research_workflow.py
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+          else
+            git commit -m "P1: integrate bounded retry execution into autonomous flows"
+            git push origin HEAD:main
+          fi
