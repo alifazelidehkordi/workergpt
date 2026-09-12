@@ -495,8 +495,10 @@ class ResearchWorkflow:
         prior_ids: list[str] = []
         for revision in section.get("revision_history", []):
             for item in revision.get("feedback", []):
-                if isinstance(item, dict) and item.get("id"):
-                    prior_ids.append(str(item["id"]))
+                if isinstance(item, dict):
+                    prior_id = item.get("issue_id") or item.get("id")
+                    if prior_id:
+                        prior_ids.append(str(prior_id))
         actions = []
         for issue in issues:
             issue_id = str(issue.get("id", "unknown"))

@@ -217,6 +217,27 @@ def test_section_revise_runs_fresh_research_and_critic(workflow_env):
     assert repair_plan["actions"][0]["occurrence"] == 1
 
 
+def test_repeated_critic_issue_gets_escalated_repair_strategy(workflow_env):
+    workflow, _, _ = workflow_env
+    section = {
+        "section_revision_attempts": 1,
+        "revision_history": [{"feedback": [{"issue_id": "source-1"}]}],
+    }
+    issue = {
+        "id": "source-1",
+        "severity": "major",
+        "location": "منابع",
+        "problem": "منبع تأیید نشده",
+        "required_change": "منبع معتبر جایگزین شود",
+    }
+
+    plan = workflow._build_repair_plan("KSR-1", "01_construct", section, [issue])
+
+    assert plan["actions"][0]["occurrence"] == 2
+    assert plan["actions"][0]["repeated"] is True
+    assert "صرفاً بازعبارت‌بندی نکن" in plan["actions"][0]["repair_strategy"]
+
+
 def test_precritic_ui_error_is_archived_and_researched_again(workflow_env, monkeypatch):
     workflow, fake, _ = workflow_env
     original_run = fake.run_agent
