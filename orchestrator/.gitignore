@@ -10,3 +10,10 @@ venv/
 # Runtime outputs
 projects/*/outbox/*.md
 projects/*/checkpoints/*.json
+
+# Durable research runtime state and generated artifacts stay local.
+projects/*/research_artifacts/
+projects/*/research_workflow.json
+projects/*/modules/
+src/*.egg-info/
+projects/smoke_test/

@@ -7,7 +7,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.agents import CheckpointAgent, CriticAgent, PlannerAgent, ResearcherAgent, SynthesizerAgent
+from orchestrator.agents import (
+    CheckpointAgent,
+    CriticAgent,
+    PlannerAgent,
+    ResearchFileCriticAgent,
+    ResearchSectionAgent,
+    ResearchSectionCriticAgent,
+    ResearchTopicPlannerAgent,
+    ResearcherAgent,
+    SynthesizerAgent,
+)
 from orchestrator.core.models import AgentOutput, ProjectState
 from orchestrator.tools.chatgpt_web import ChatGPTWebExecutor
 
@@ -29,6 +39,10 @@ class Orchestrator:
             "synthesizer": SynthesizerAgent(),
             "checkpoint": CheckpointAgent(),
             "planner": PlannerAgent(),
+            "research_section": ResearchSectionAgent(),
+            "research_section_critic": ResearchSectionCriticAgent(),
+            "research_file_critic": ResearchFileCriticAgent(),
+            "research_topic_planner": ResearchTopicPlannerAgent(),
         }
 
     def close(self) -> None:
@@ -67,7 +81,7 @@ class Orchestrator:
 
     def _save_agent_output(self, project_id: str, agent_name: str, output: AgentOutput) -> Path:
         project_path = self.projects_dir / project_id
-        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         folder = project_path / ("checkpoints" if agent_name == "checkpoint" else "critics" if agent_name == "critic" else "modules")
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{agent_name}_{timestamp}.md"

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from orchestrator.core.orchestrator import Orchestrator
+from orchestrator.research_workflow import ResearchWorkflow
 from orchestrator.tools.browser_runtime import open_login_session
 
 
@@ -68,6 +70,25 @@ def main() -> None:
 
     status = sub.add_parser("status", help="Show project status")
     status.add_argument("project_id")
+
+    workflow = sub.add_parser("workflow", help="Manage the durable section-by-section research workflow")
+    workflow_sub = workflow.add_subparsers(dest="workflow_command", required=True)
+
+    workflow_init = workflow_sub.add_parser("init", help="Index research topics and create durable workflow state")
+    workflow_init.add_argument("project_id")
+    workflow_init.add_argument("--vault", type=Path, required=True)
+    workflow_init.add_argument("--report", type=Path, default=None)
+    workflow_init.add_argument("--expected-topics", type=int, default=70, help="Expected unique topic count; use 0 to disable")
+
+    workflow_status = workflow_sub.add_parser("status", help="Show durable research workflow status")
+    workflow_status.add_argument("project_id")
+
+    workflow_run = workflow_sub.add_parser("run", help="Run or resume one topic")
+    workflow_run.add_argument("project_id")
+    workflow_run.add_argument("--topic", help="Topic id (for example KSR-10); defaults to the next incomplete topic")
+    workflow_run.add_argument("--max-sections", type=int, default=None, help="Stop after this many newly approved sections")
+    workflow_run.add_argument("--max-revisions", type=int, default=1, help="Maximum targeted final-audit repair rounds")
+    workflow_run.add_argument("--max-section-revisions", type=int, default=1, help="Maximum fresh researcher retries per section")
 
     args = parser.parse_args()
 
@@ -134,6 +155,27 @@ def main() -> None:
             print(f"Module: {state.current_module}")
             print(f"Updated: {state.last_updated}")
             print(f"Notes: {state.notes}")
+        elif args.command == "workflow":
+            research_workflow = ResearchWorkflow(orch, args.project_id)
+            if args.workflow_command == "init":
+                expected = None if args.expected_topics == 0 else args.expected_topics
+                state = research_workflow.initialize(args.vault, args.report, expected_topics=expected)
+                print(json.dumps({"state_file": str(research_workflow.state_path), "summary": research_workflow.summary(), "status": state["status"]}, ensure_ascii=False, indent=2))
+            elif args.workflow_command == "status":
+                state = research_workflow.load()
+                print(json.dumps({"status": state["status"], "active": state.get("active"), "summary": research_workflow.summary()}, ensure_ascii=False, indent=2))
+            elif args.workflow_command == "run":
+                topic = args.topic or research_workflow.next_topic()
+                if topic is None:
+                    print(json.dumps({"status": "complete", "message": "All topics are complete"}, ensure_ascii=False, indent=2))
+                else:
+                    result = research_workflow.run_topic(
+                        topic,
+                        max_sections=args.max_sections,
+                        max_revisions=args.max_revisions,
+                        max_section_revisions=args.max_section_revisions,
+                    )
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             parser.print_help()
     finally:

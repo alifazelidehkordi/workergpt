@@ -22,11 +22,13 @@ class BaseAgent(ABC):
             prompt=self.build_prompt(context),
             files=files or [],
             expected_output="text",
+            timeout_seconds=int(context.get("_timeout_seconds", 300)),
             metadata={
                 "agent": self.name,
                 "project_id": context.get("project_id"),
                 "phase": context.get("current_phase"),
                 "module": context.get("current_module"),
+                "web_search": bool(context.get("_web_search") or context.get("web_search")),
             },
         )
 

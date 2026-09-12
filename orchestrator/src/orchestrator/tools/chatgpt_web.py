@@ -14,6 +14,9 @@ class MockChatGPTWebExecutor:
     def execute(self, request: ExecuteRequest) -> ExecuteResult:
         start = time.monotonic()
         agent = request.metadata.get("agent", "unknown")
+        search_requested = bool(
+            request.metadata.get("_web_search") or request.metadata.get("web_search")
+        )
         preview = request.prompt[:140].replace("\n", " ")
         return ExecuteResult(
             success=True,
@@ -23,7 +26,12 @@ class MockChatGPTWebExecutor:
                 "This is a simulated response.\n"
             ),
             execution_time=time.monotonic() - start,
-            metadata={"mock": True, "agent": agent},
+            metadata={
+                "mock": True,
+                "agent": agent,
+                "search_requested": search_requested,
+                "search_observed": False,
+            },
         )
 
 
@@ -76,11 +84,22 @@ class RealChatGPTWebExecutor:
 
     def execute(self, request: ExecuteRequest) -> ExecuteResult:
         start = time.monotonic()
+        search_requested = bool(
+            request.metadata.get("_web_search") or request.metadata.get("web_search")
+        )
+        search_observed = False
         try:
             session = self._session_for(request.timeout_seconds)
             session.start_new_chat()
             for file_path in request.files:
                 session.upload(file_path)
+            if search_requested:
+                try:
+                    search_observed = bool(session.enable_web_search())
+                except Exception:
+                    # The prompt remains the fallback search instruction, so an
+                    # unavailable or changed UI control must not abort research.
+                    search_observed = False
             before_count = session.send_message(request.prompt)
             text = session.wait_for_response(before_count, request.timeout_seconds)
             limit_hit = self._is_limit_text(text)
@@ -114,6 +133,8 @@ class RealChatGPTWebExecutor:
                     "provider": "patchright",
                     "profile": self.profile,
                     "headless": self.headless,
+                    "search_requested": search_requested,
+                    "search_observed": search_observed,
                 },
             )
         except Exception as exc:
@@ -125,6 +146,8 @@ class RealChatGPTWebExecutor:
                     "mock": False,
                     "provider": "patchright",
                     "error_type": type(exc).__name__,
+                    "search_requested": search_requested,
+                    "search_observed": search_observed,
                 },
             )
 
