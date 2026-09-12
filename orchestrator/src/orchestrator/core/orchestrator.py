@@ -130,13 +130,20 @@ class Orchestrator:
         Volatile values such as timestamps, active_agent, notes, and executor
         metadata are deliberately excluded. Meaningful workflow progress is
         included so the same agent/input can run again after state advances.
+        P0's own bookkeeping is excluded so a blocked request remains blocked
+        on the third, fourth, and later identical attempts.
         """
+        semantic_progress = {
+            key: value
+            for key, value in state.progress.items()
+            if not key.startswith("p0_") and key != "resume_pending"
+        }
         return {
             "project_id": project_id,
             "project_definition": self.get_definition(project_id),
             "current_phase": state.current_phase,
             "current_module": state.current_module,
-            "progress": state.progress,
+            "progress": semantic_progress,
             "input": context or {},
         }
 
